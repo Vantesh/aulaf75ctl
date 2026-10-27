@@ -1,0 +1,118 @@
+# aulaf75ctl
+
+Linux CLI for AULA F75 lighting over USB. Set static RGB, select onboard effects,
+and adjust brightness, speed and palettes without running a background service.
+
+Tested on an AULA F75 over USB: static RGB, Fixed On and Rainbow, Fixed On
+brightness/palettes, Rainbow speed, and Off/On.
+
+## Install
+
+Requires Linux and Rust 1.89+:
+
+```sh
+git clone git@github.com:Vantesh/aulaf75ctl.git
+cd aulaf75ctl
+cargo install --path . --locked
+```
+
+Run as your normal desktop user, without sudo. If HID access is denied, see the
+optional [udev rule](packaging/70-aulaf75ctl.rules) for wired interface 1. It is
+not installed automatically.
+
+## Commands
+
+Close F75 Studio and other keyboard controllers before accessing the keyboard.
+
+```sh
+aulaf75ctl devices --json
+aulaf75ctl status --transport wired --json
+aulaf75ctl lighting static '#89b4fa' --dry-run --json
+```
+
+| Lighting command | Values |
+| --- | --- |
+| `static '#RRGGBB'` | Uniform stored RGB; selects Self-defined |
+| `effect <name\|id>` | Onboard effects: 0, 1–18, 21 |
+| `brightness <0-9>` | Active effect's saved level; 0 is not Off |
+| `speed <0-4>` | Animation speed for effects 2–18 |
+| `palette <name\|0-7>` | red, green, blue, yellow, magenta, cyan, white, random |
+| `off` / `on` | Off / restore the previous effect in this USB session |
+| `color '#RRGGBB'` | Separate volatile preview; physical behavior unverified |
+
+Prefix each command with `aulaf75ctl lighting`. Palette availability depends on
+the active effect; see [protocol notes](docs/protocol-notes.md). Use `--help` for
+all options and `--version` for the installed version.
+
+## Review and apply
+
+**Static RGB overwrites the stored per-key color layout.** Persistent changes
+require a fresh review and explicit approval. Discovery, status and dry-runs do
+not change keyboard settings; `color --dry-run` needs no hardware at all.
+
+```sh
+umask 077
+review_file=$(mktemp "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/aula-review.XXXXXX.json")
+aulaf75ctl lighting static '#89b4fa' --transport wired --dry-run --details --json > "$review_file"
+python3 -m json.tool "$review_file"
+```
+
+Check `ok`, the device/model, changed bytes and planned transfers. After approving
+that exact change, apply once:
+
+```sh
+aulaf75ctl lighting static '#89b4fa' --transport wired --apply --review "$review_file" --json
+```
+
+Use a new review for every operation after state changes. Apply checks the fresh
+configuration and RGB matrix against the review. No-ops skip writes and snapshots.
+Changed static colors retain the matrix-then-configuration refresh.
+
+Snapshots are saved under `$XDG_STATE_HOME/aulaf75ctl` (default
+`~/.local/state/aulaf75ctl`). Results include the snapshot path and write/readback
+outcomes. On failure, stop and keep
+those files: there are no automatic retries or rollback. See the
+[recovery guide](docs/session-lighting-power.md).
+
+`--json` returns one schema-1 result on stdout; diagnostics go to stderr. Exit
+codes are 0 for success, 1 for operation failure and 2 for invalid arguments.
+Persistent dry-runs include full review data only with `--details --json`.
+Readback success verifies stored bytes, not visible lighting.
+
+## Limits
+
+- Wired control: `258a:010c`, interface 1, with descriptor/model checks. Receiver
+  `3554:fa09` detection is passive; wireless control and Bluetooth are unsupported.
+- Self-defined brightness saves correctly but did not visibly dim LEDs, including
+  in Studio. Storm (18) saves correctly but remained dark.
+- Off/On restoration needs the same USB device instance. This F75 has no USB
+  serial, so reconnects and reboots invalidate it. Missing, changed or pending
+  session state blocks restoration; nothing restores automatically.
+- Controller detection is best-effort; protected processes and later openers may
+  be missed. The lock coordinates CLI instances only.
+
+## Development
+
+Tests use synthetic fixtures without accessing hardware:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --locked --release
+```
+
+## Credits
+
+Special thanks to [F75 Studio](https://github.com/trenbolone1122/aula-f75-linux) by [trenbolone1122](https://github.com/trenbolone1122), whose excellent work on the AULA F75 protocol made this project possible.
+
+If you prefer a full-featured graphical interface, definitely check out F75 Studio!
+
+Additional thanks to:
+
+- [Keylux](https://github.com/SibteProf/keylux) for additional protocol research and documentation.
+- [OpenRGB](https://github.com/CalcProgrammer1/OpenRGB) for useful HID protocol references.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
