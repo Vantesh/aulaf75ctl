@@ -1,0 +1,17 @@
+[package]
+name = "aulaf75ctl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "Guarded Linux HID inspection and wired lighting control for AULA F75"
+repository = "https://github.com/Vantesh/aulaf75ctl"
+readme = "README.md"
+keywords = ["aula", "f75", "keyboard", "hid", "rgb"]
+categories = ["command-line-utilities", "hardware-support"]
+include = ["/src/**", "/tests/**", "/docs/**", "/packaging/70-aulaf75ctl.rules", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+
+[dependencies]
+nix = { version = "0.31", default-features = false, features = ["ioctl", "user"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
