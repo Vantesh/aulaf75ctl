@@ -322,7 +322,12 @@ impl Session {
                 "Restoration metadata changed since it was loaded; prepare a fresh review",
             ));
         }
-        let current = Effect::from_id(config.effect_id)?;
+        let current = config.active_effect.ok_or_else(|| {
+            state_error(
+                "unsupported_configuration",
+                "Active lighting mode is unknown",
+            )
+        })?;
         if let Some(record) = &self.record {
             if record.instance != self.instance {
                 return Err(state_error(
@@ -435,7 +440,7 @@ impl Session {
             .map_err(|_| state_error("restoration_corrupt", "Invalid saved matrix"))?;
         if cfg.len() != protocol::CONFIG_LEN
             || cfg[126..] != [0x5a, 0xa5]
-            || cfg[10] != record.previous_effect
+            || (if cfg[9] == 1 { 21 } else { cfg[10] }) != record.previous_effect
             || rgb.len() != protocol::STATIC_RGB_LEN
         {
             return Err(state_error(

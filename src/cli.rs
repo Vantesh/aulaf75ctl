@@ -38,10 +38,11 @@ Wired color changes retain Studio's effect refresh; identical requests skip writ
 Default output is concise; --dry-run --details --json creates an applicable review.
 Visible competing HID holders are rejected; the advisory lock is not exclusive.
 Effect selection preserves saved brightness, speed, palette and per-key RGB.
-Effect names/IDs: fixed-on(1), rainbow(3), rotating-storm(18), self-defined(21),
-off(0), and the other complete Studio effect names (see README).
+Effect names/IDs: fixed-on(1), rainbow(3), self-defined(21), off(0),
+and the other complete Studio effect names (see README).
+IDs 9, 14 and 18 are recognized but rendered incorrectly on the tested F75.
 Brightness changes only the active effect's saved level (0-9), preserving RGB.
-Speed changes only supported hardware effects (2-18), levels 0-4, preserving palette.
+Speed changes the active animation's saved level (0-4), where available, preserving palette.
 Palettes: red(0), green(1), blue(2), yellow(3), magenta(4), cyan(5), white(6), random(7).
 Palette selection preserves speed and requires a palette-capable active effect.
 Off selects native effect 0; On restores a verified target for the same USB instance.

@@ -6,6 +6,19 @@ and adjust brightness, speed and palettes without running a background service.
 Tested on an AULA F75 over USB: static RGB, Fixed On and Rainbow, Fixed On
 brightness/palettes, Rainbow speed, and Off/On.
 
+Fifteen native effects were observed in the physical knob cycle: IDs 1–8,
+10–13 and 15–17. Off and Self-defined/per-key are separate modes. Shadow Fade
+(9), Scanner (14) and Storm (18) are recognized and can still be requested,
+but did not render correctly on the tested F75. Knob exposure does not imply
+individual visual verification of every animation.
+
+The stored native-effect ID may differ from the active lighting mode. Schema-1
+JSON retains `effect_id`/`effect_name` as the stored selection and adds
+`stored_native_effect_id`, `active_effect` and `effect_name_scope`; `lighting_mode`
+and saved parameters describe the active mode. Unknown selectors yield an unknown
+mode and null active effect/parameters. `observed_native_effects` lists the fifteen
+IDs and names using the CLI's protocol mapping.
+
 ## Install
 
 Requires Linux and Rust 1.89+:
@@ -33,9 +46,9 @@ aulaf75ctl lighting static '#89b4fa' --dry-run --json
 | Lighting command | Values |
 | --- | --- |
 | `static '#RRGGBB'` | Uniform stored RGB; selects Self-defined |
-| `effect <name\|id>` | Onboard effects: 0, 1–18, 21 |
+| `effect <name\|id>` | Native effects: 1–8, 10–13, 15–17; Off: 0; Self-defined: 21 |
 | `brightness <0-9>` | Active effect's saved level; 0 is not Off |
-| `speed <0-4>` | Animation speed for effects 2–18 |
+| `speed <0-4>` | Saved animation speed, where available |
 | `palette <name\|0-7>` | red, green, blue, yellow, magenta, cyan, white, random |
 | `off` / `on` | Off / restore the previous effect in this USB session |
 | `color '#RRGGBB'` | Separate volatile preview; physical behavior unverified |
@@ -84,7 +97,7 @@ Readback success verifies stored bytes, not visible lighting.
 - Wired control: `258a:010c`, interface 1, with descriptor/model checks. Receiver
   `3554:fa09` detection is passive; wireless control and Bluetooth are unsupported.
 - Self-defined brightness saves correctly but did not visibly dim LEDs, including
-  in Studio. Storm (18) saves correctly but remained dark.
+  in Studio.
 - Off/On restoration needs the same USB device instance. This F75 has no USB
   serial, so reconnects and reboots invalidate it. Missing, changed or pending
   session state blocks restoration; nothing restores automatically.
