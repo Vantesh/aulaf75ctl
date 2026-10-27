@@ -738,9 +738,10 @@ fn update_brightness_capability(device: &mut Device) {
         && device.protocol_verified
         && device.model.as_ref().is_some_and(|m| m.matches_expected)
         && device.instance.is_some()
-        && device.configuration.as_ref().is_some_and(|c| {
-            c.mode_bytes[0] <= 1 && protocol::Effect::from_id(c.effect_id).is_ok()
-        });
+        && device
+            .configuration
+            .as_ref()
+            .is_some_and(|c| c.active_effect.is_some());
     device.capabilities.brightness = device.transport == Transport::Wired
         && device.usb_id == "258a:010c"
         && device.interface_verified

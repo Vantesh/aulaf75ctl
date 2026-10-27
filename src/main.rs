@@ -371,9 +371,13 @@ fn main() -> ExitCode {
                     )?;
                     writeln!(
                         out,
-                        "  Effect {} ({}), brightness {}; color {} (index {})",
+                        "  Stored effect {} ({}, {}); active {}, brightness {}; color {} (index {})",
                         config.effect_id,
                         config.effect_name,
+                        config.effect_name_scope,
+                        config
+                            .active_effect
+                            .map_or_else(|| "unknown".into(), |e| format!("{} ({})", e.id, e.name)),
                         config
                             .brightness
                             .map_or_else(|| "unknown".into(), |b| format!("{b}/9")),
@@ -675,6 +679,9 @@ fn print_lighting_plan(out: &mut impl Write, plan: &protocol::LightingPlan) -> i
 
 fn json_report(report: &Report, details: bool) -> Result<serde_json::Value, serde_json::Error> {
     let mut value = serde_json::to_value(report)?;
+    value["observed_native_effects"] = serde_json::to_value(
+        protocol::OBSERVED_NATIVE_EFFECT_IDS.map(|id| protocol::Effect::from_id(id).unwrap()),
+    )?;
     if let Some(plan) = report
         .static_plan
         .as_ref()
@@ -998,8 +1005,19 @@ mod tests {
             power_plan: None,
             power_result: None,
         };
-        let output = serde_json::to_value(report).unwrap();
+        let output = json_report(&report, false).unwrap();
         assert_eq!(output["schema_version"], 1);
+        let observed = output["observed_native_effects"].as_array().unwrap();
+        assert_eq!(observed.len(), 15);
+        assert_eq!(
+            observed[0],
+            serde_json::json!({"id": 1, "name": "fixed_on"})
+        );
+        assert!(
+            !observed
+                .iter()
+                .any(|e| matches!(e["id"].as_u64(), Some(9 | 14 | 18)))
+        );
         assert_eq!(output["ok"], false);
         assert_eq!(output["error"]["code"], "device_not_found");
         let args = ["status", "--json", "--transport", "wireless"].map(String::from);

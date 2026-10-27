@@ -600,11 +600,11 @@ mod tests {
     #[test]
     fn session_power_roundtrip_restarts_noops_and_full_state_preservation() {
         use crate::power::{Action, Session};
-        for effect in [1, 21] {
+        for (effect, stored) in [(1, 1), (21, 21), (21, 18), (21, 3)] {
             let (root, instance) = power_runtime();
             let (_, mut config, matrix, _, _) = fixture();
             config[8 + 9] = u8::from(effect == 21);
-            config[8 + 10] = effect;
+            config[8 + 10] = stored;
             let mut session = Session::load_at(instance.clone(), root.clone()).unwrap();
             let (already_on, _, trace) =
                 power_exchange(&mut session, &root, Action::On, &config, &matrix, "");
@@ -663,6 +663,7 @@ mod tests {
             assert!(on.error.is_none());
             assert_eq!(trace.iter().filter(|s| *s == "write:04").count(), 1);
             assert_eq!(on.power.as_ref().unwrap().restoration_status, "on_verified");
+            config[8 + 10] = effect; // Selection uses Studio's canonical Self-defined ID.
             assert_eq!(&on_config[8..136], &config[8..136]);
             assert!(!on.hardware_verified && !on.visual_verified);
             let record = fs::read(&path).unwrap();
@@ -955,7 +956,7 @@ mod tests {
             }
             if case == "effect_noop" {
                 config[8 + 10] = effect.id;
-                config[8 + 9] = 1;
+                config[8 + 9] = u8::from(effect.id == 21);
             }
         }
         if let Some(level) = request.brightness() {

@@ -129,6 +129,9 @@ pub struct Configuration {
     pub lighting_mode: &'static str,
     pub mode_bytes: [u8; 3],
     pub effect_id: u8,
+    pub stored_native_effect_id: u8,
+    pub active_effect: Option<Effect>,
+    pub effect_name_scope: &'static str,
     pub effect_name: &'static str,
     pub parameter_offset: Option<usize>,
     pub brightness: Option<u8>,
@@ -166,6 +169,9 @@ pub fn parse_model(reply: &[u8]) -> Result<Model, Error> {
         },
     })
 }
+
+pub const OBSERVED_NATIVE_EFFECT_IDS: [u8; 15] =
+    [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 16, 17];
 
 const EFFECT_NAMES: [&str; 18] = [
     "fixed_on",
@@ -414,25 +420,29 @@ pub fn parse_config(reply: &[u8]) -> Result<Configuration, Error> {
         ));
     }
     let mode_bytes = [config[9], config[10], config[59]];
-    let effect = effect_slot(config[10]);
-    // Studio's effect_from_block reads the active ID at 10, independently of
-    // the selector at 9. The observed Storm state has that selector at 1.
-    // Recognition is separate from the explicit write/preview eligibility gates.
-    let lighting_mode = match config[10] {
-        21 => "per_key",
-        1 => "solid",
-        0 => "off",
-        2..=18 => "hardware_effect",
+    // Byte 10 retains the native selection when byte 9 selects stored RGB.
+    let active_id = match (config[9], config[10]) {
+        (1, _) => Some(21),
+        (0, 0..=18) => Some(config[10]),
+        _ => None,
+    };
+    let active_effect = active_id.and_then(|id| Effect::from_id(id).ok());
+    let effect = active_id.and_then(effect_slot);
+    let lighting_mode = match active_id {
+        Some(21) => "per_key",
+        Some(1) => "solid",
+        Some(0) => "off",
+        Some(2..=18) => "hardware_effect",
         _ => "unknown",
     };
     let offset = effect.map(|(slot, _)| 0x3a + slot * 2);
     let brightness = offset
         .map(|o| config[o])
-        .filter(|b| *b <= 9 && config[10] != 0 && lighting_mode != "unknown");
+        .filter(|b| *b <= 9 && active_id != Some(0) && lighting_mode != "unknown");
     let speed_raw = offset.map(|o| config[o + 1] >> 4);
     let color_raw = offset.map(|o| config[o + 1] & 0x0f);
-    let has_speed = Effect::from_id(config[10]).is_ok_and(Effect::supports_speed);
-    let has_color = Effect::from_id(config[10]).is_ok_and(Effect::supports_palette);
+    let has_speed = active_effect.is_some_and(Effect::supports_speed);
+    let has_color = active_effect.is_some_and(Effect::supports_palette);
     let color_index = color_raw.filter(|c| *c <= 7 && has_color);
     let color_name = color_index
         .map(|c| PALETTE_NAMES[usize::from(c)])
@@ -443,7 +453,14 @@ pub fn parse_config(reply: &[u8]) -> Result<Configuration, Error> {
         lighting_mode,
         mode_bytes,
         effect_id: config[10],
-        effect_name: effect.map_or("unknown", |(_, name)| name),
+        stored_native_effect_id: config[10],
+        active_effect,
+        effect_name_scope: if active_id == Some(config[10]) {
+            "active"
+        } else {
+            "saved_selection"
+        },
+        effect_name: effect_slot(config[10]).map_or("unknown", |(_, name)| name),
         parameter_offset: offset,
         brightness,
         speed: speed_raw.filter(|s| *s <= 4 && has_speed),
@@ -675,7 +692,7 @@ pub fn prepare_effect(
     effect: Effect,
 ) -> Result<LightingPlan, Error> {
     let effect = Effect::from_id(effect.id)?;
-    let previous = Effect::from_id(config.effect_id).map_err(|_| Error::new("unsupported_configuration", "Current configuration uses an unknown effect/layout; refusing to replace it with defaults"))?;
+    let previous = config.active_effect.ok_or_else(|| Error::new("unsupported_configuration", "Current configuration uses an unknown effect/layout; refusing to replace it with defaults"))?;
     if config.length != CONFIG_LEN
         || !config.signature_valid
         || config.bytes[126..] != [0x5a, 0xa5]
@@ -688,8 +705,7 @@ pub fn prepare_effect(
     }
     let matrix = parse_matrix(matrix_reply)?;
     let mut modified = config.bytes;
-    // An already-active ID is a true no-op even if onboard controls left a
-    // different selector value. Do not normalize unrelated state to wear flash.
+    // Compare the active mode, not the retained native selection.
     if previous.id != effect.id {
         modified[9] = u8::from(effect.id == 21);
         modified[10] = effect.id;
@@ -721,7 +737,7 @@ pub fn prepare_effect(
 // Resolve through the same metadata/decoder as status; in particular ID 21 is
 // slot 18, not slot 21. Off has no supported brightness parameter.
 pub fn brightness_offset(config: &Configuration) -> Result<usize, Error> {
-    let effect = Effect::from_id(config.effect_id).ok();
+    let effect = config.active_effect;
     if config.length != CONFIG_LEN
         || !config.signature_valid
         || config.bytes[126..] != [0x5a, 0xa5]
@@ -768,7 +784,12 @@ pub fn prepare_speed(
     matrix_reply: &[u8],
     level: Speed,
 ) -> Result<LightingPlan, Error> {
-    let effect = Effect::from_id(config.effect_id)?;
+    let effect = config.active_effect.ok_or_else(|| {
+        Error::new(
+            "unsupported_configuration",
+            "Active lighting mode is unknown",
+        )
+    })?;
     if !effect.supports_speed() {
         return Err(Error::new(
             "unsupported_speed_effect",
@@ -809,7 +830,12 @@ pub fn prepare_palette(
     palette: Palette,
 ) -> Result<LightingPlan, Error> {
     let palette = Palette::from_index(palette.index)?;
-    let effect = Effect::from_id(config.effect_id)?;
+    let effect = config.active_effect.ok_or_else(|| {
+        Error::new(
+            "unsupported_configuration",
+            "Active lighting mode is unknown",
+        )
+    })?;
     if !effect.supports_palette() {
         return Err(Error::new(
             "unsupported_palette_effect",
@@ -869,7 +895,7 @@ fn build_plan(
         rgb: request.rgb(),
         requested_effect: request.effect(),
         previous_effect,
-        active_effect: request.brightness().or(request.speed()).or(request.palette().map(|p| p.index)).and_then(|_| Effect::from_id(config.effect_id).ok()),
+        active_effect: request.brightness().or(request.speed()).or(request.palette().map(|p| p.index)).and(config.active_effect),
         previous_brightness: request.brightness().and(config.brightness),
         requested_brightness: request.brightness(),
         previous_speed: request.speed().and(config.speed),
@@ -1010,7 +1036,7 @@ mod tests {
         }
         for (id, offset) in [(1, 59), (2, 61), (5, 67), (6, 69), (18, 93)] {
             for speed in 0..=15 {
-                let mut reply = config_fixture(1, id);
+                let mut reply = config_fixture(u8::from(id == 21), id);
                 for slot in 0..20 {
                     reply[8 + 58 + slot * 2] = 9;
                     reply[8 + 59 + slot * 2] = 0x23;
@@ -1051,7 +1077,7 @@ mod tests {
             }
         }
         for id in (0..=18).chain([19, 20, 21, 255]) {
-            let mut reply = config_fixture(0, id);
+            let mut reply = config_fixture(u8::from(id == 21), id);
             if let Some((slot, _)) = effect_slot(id) {
                 reply[8 + 58 + slot * 2] = 9;
                 reply[8 + 59 + slot * 2] = 0xf3;
@@ -1116,7 +1142,7 @@ mod tests {
         }
         for (id, offset) in [(2, 61), (3, 63), (18, 93)] {
             for palette in 0..=15 {
-                let mut reply = config_fixture(1, id);
+                let mut reply = config_fixture(u8::from(id == 21), id);
                 for slot in 0..20 {
                     reply[8 + 58 + slot * 2] = 9;
                     reply[8 + 59 + slot * 2] = 0x23;
@@ -1154,7 +1180,7 @@ mod tests {
             }
         }
         for id in (0..=18).chain([19, 20, 21, 255]) {
-            let mut reply = config_fixture(0, id);
+            let mut reply = config_fixture(u8::from(id == 21), id);
             if let Some((slot, _)) = effect_slot(id) {
                 reply[8 + 58 + slot * 2] = 9;
                 reply[8 + 59 + slot * 2] = 0x2f;
@@ -1188,8 +1214,14 @@ mod tests {
         for (i, byte) in matrix[8..392].iter_mut().enumerate() {
             *byte = i as u8;
         }
-        for (id, offset) in [(1, 58), (3, 62), (18, 92), (21, 94)] {
-            let mut reply = config_fixture(1, id); // includes observed Storm selector 1
+        for (stored, id, offset) in [
+            (1, 1, 58),
+            (3, 3, 62),
+            (18, 18, 92),
+            (21, 21, 94),
+            (18, 21, 94),
+        ] {
+            let mut reply = config_fixture(u8::from(id == 21), stored);
             for slot in 0..20 {
                 reply[8 + 58 + slot * 2] = 5;
                 reply[8 + 59 + slot * 2] = 0x37;
@@ -1235,7 +1267,7 @@ mod tests {
             );
         }
         for (offset, value) in [(9, 2), (92, 10), (93, 0x57), (93, 0x38)] {
-            let mut reply = config_fixture(1, 18);
+            let mut reply = config_fixture(0, 18);
             reply[8 + 92] = 9;
             reply[8 + 93] = 0x37;
             reply[8 + offset] = value;
@@ -1310,10 +1342,10 @@ mod tests {
             Effect::from_id(18).unwrap(),
         )
         .unwrap();
-        assert!(storm.no_op && storm.steps.is_empty());
+        assert!(!storm.no_op);
         assert_eq!(
-            storm.configuration, storm.original_configuration,
-            "same active ID must not normalize the selector"
+            storm.configuration[9], 0,
+            "selecting the retained native ID must activate the native selector"
         );
         for selector in [0, 1] {
             observed_storm[8 + 9] = selector;
@@ -1323,13 +1355,13 @@ mod tests {
                 Effect::from_id(21).unwrap(),
             )
             .unwrap();
-            assert!(!back.no_op);
+            assert_eq!(back.no_op, selector == 1);
             assert_eq!(back.configuration[9], 1);
-            assert_eq!(back.configuration[10], 21);
+            assert_eq!(back.configuration[10], if selector == 1 { 18 } else { 21 });
             assert_eq!(back.matrix, back.original_matrix);
             assert_eq!(
                 back.steps.iter().map(|p| p.command).collect::<Vec<_>>(),
-                [4]
+                if selector == 1 { vec![] } else { vec![4] }
             );
             assert_eq!(back.configuration[94], observed_storm[8 + 94]);
         }
@@ -1456,6 +1488,46 @@ mod tests {
     }
 
     #[test]
+    fn active_mode_and_saved_selection_are_distinct_in_schema_one() {
+        for (selector, stored, active, mode) in [
+            (0, 3, Some(3), "hardware_effect"),
+            (1, 18, Some(21), "per_key"),
+            (1, 3, Some(21), "per_key"),
+            (0, 0, Some(0), "off"),
+            (2, 3, None, "unknown"),
+            (255, 18, None, "unknown"),
+            (0, 21, None, "unknown"),
+        ] {
+            let config = parse_config(&config_fixture(selector, stored)).unwrap();
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(config.lighting_mode, mode);
+            assert_eq!(config.active_effect.map(|e| e.id), active);
+            assert_eq!(json["stored_native_effect_id"], stored);
+            assert_eq!(json["effect_id"], stored);
+            assert_eq!(
+                config.effect_name_scope,
+                if active == Some(stored) {
+                    "active"
+                } else {
+                    "saved_selection"
+                }
+            );
+            if active.is_none() {
+                assert!(config.parameter_offset.is_none() && config.brightness.is_none());
+                assert!(
+                    prepare_effect(&config, &matrix_request(), Effect::from_id(1).unwrap())
+                        .is_err()
+                );
+            }
+        }
+        assert_eq!(OBSERVED_NATIVE_EFFECT_IDS.len(), 15);
+        for id in [9, 14, 18] {
+            assert!(!OBSERVED_NATIVE_EFFECT_IDS.contains(&id));
+            assert!(Effect::from_id(id).is_ok());
+        }
+    }
+
+    #[test]
     fn studio_effect_slots_explain_observed_mode_and_preserve_unknown_values() {
         let config = parse_config(&config_fixture(0, 1)).unwrap();
         assert_eq!(config.mode_bytes, [0, 1, 51]);
@@ -1472,14 +1544,14 @@ mod tests {
         assert_eq!(custom.brightness, Some(4));
         assert_eq!(custom.color_index, None);
         assert_eq!(custom.color_name, "unknown");
-        for (flag, id) in [(0, 19), (0, 20), (1, 19)] {
+        for (flag, id) in [(0, 19), (0, 20)] {
             let config = parse_config(&config_fixture(flag, id)).unwrap();
             assert_eq!(config.lighting_mode, "unknown");
             assert!(prepare_static(&config, &matrix_request(), Color([1, 2, 3])).is_err());
         }
         // Known IDs remain recognizable even when their selector is unsuitable
         // for a write. Do not turn status recognition into a preview bypass.
-        for (flag, id, mode) in [(1, 1, "solid"), (0, 21, "per_key"), (2, 1, "solid")] {
+        for (flag, id, mode) in [(1, 1, "per_key"), (0, 21, "unknown"), (2, 1, "unknown")] {
             let config = parse_config(&config_fixture(flag, id)).unwrap();
             assert_eq!(config.lighting_mode, mode);
             assert!(require_preview_mode(&config).is_err());
@@ -1514,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn storm_is_recognized_by_effect_id_while_selector_and_unrelated_bytes_are_preserved() {
+    fn per_key_selector_overrides_stored_storm_and_preserves_unrelated_bytes() {
         let mut reply = config_fixture(1, 18);
         reply[8 + 26] = 0xa7; // Preserve arbitrary current data, never normalize it.
         reply[8 + 92] = 8;
@@ -1522,12 +1594,15 @@ mod tests {
         reply[8 + 94] = 9;
         let config = parse_config(&reply).unwrap();
         assert_eq!(config.mode_bytes, [1, 18, 51]);
-        assert_eq!(config.lighting_mode, "hardware_effect");
+        assert_eq!(config.lighting_mode, "per_key");
+        assert_eq!(config.effect_id, 18);
         assert_eq!(config.effect_name, "storm");
-        assert_eq!(config.parameter_offset, Some(92));
-        assert_eq!(config.brightness, Some(8));
-        assert_eq!(config.speed, Some(3));
-        assert_eq!(config.color_index, Some(7));
+        assert_eq!(config.effect_name_scope, "saved_selection");
+        assert_eq!(config.active_effect.unwrap().id, 21);
+        assert_eq!(config.parameter_offset, Some(94));
+        assert_eq!(config.brightness, Some(9));
+        assert_eq!(config.speed, None);
+        assert_eq!(config.color_index, None);
         assert!(require_preview_mode(&config).is_err());
         let matrix = matrix_request();
         let plan = prepare_static(&config, &matrix, Color([255, 0, 0])).unwrap();

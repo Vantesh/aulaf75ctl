@@ -22,7 +22,8 @@ report). Required signature: offsets 126/127 = `5a a5`.
 | Offset | Meaning |
 | --- | --- |
 | 9 | Selector: Studio writes 1 for Self-defined, otherwise 0 |
-| 10 | Active effect ID; authoritative independently of selector 9 |
+| 10 | Stored native-effect ID; active only when selector 9 is 0 |
+| 11 | Unverified additional field; preserved |
 | `58 + 2*slot` | Saved brightness, levels 0–9 |
 | `59 + 2*slot` | Speed in high nibble (0–4), palette in low nibble (0–7), where applicable |
 | 58/59 | Fixed On, slot 0 |
@@ -37,8 +38,9 @@ to 1–18 except 3 and 15–17. Off has no brightness control.
 
 Legacy `mode_bytes` are offsets **9, 10, 59**, not an active-effect parameter
 triple: `[0,1,51]` means Fixed On with saved packed byte `0x33` (yellow palette;
-speed nibble 3 is inapplicable). `[1,18,51]` means Storm with parameters at 92/93,
-not an invalid mode. Unknown effects/parameters stay unknown; write preparation
+speed nibble 3 is inapplicable). `[1,18,51]` means active Self-defined/per-key
+with saved parameters at 94/95 and retained native selection Storm at 92/93.
+Unknown selectors/parameters stay unknown; write preparation
 additionally validates selector/layout and applicable saved ranges. Volatile
 preview requires exact selector/effect `[1,21]`.
 
@@ -68,14 +70,12 @@ reset in the reviewed worker. These paths can change saved brightness, but there
 the writer in that test. Apparent restarts while adjusting Studio brightness
 also remain unexplained.
 
-For Storm, saved 92/93 = `9/0x37` means valid brightness 9, speed 3, random palette
-7. Studio's effect/worker path uses configuration `0x04` only, without a special
-latch or follow-up command. Its doctor visually tests Fixed On/Rainbow, not Storm;
-no documented Storm-specific firmware limitation or additional activation was
-established. To investigate further, compare Studio alone with the same saved parameters,
-record full before/after payloads and a USB trace, and observe the LEDs. Review
-and approve the writes first. Avoid profile application and broad doctor tests,
-which modify other settings.
+Native IDs 1–8, 10–13 and 15–17 were exposed in the physical knob cycle,
+alongside Off and one stored per-key mode. Shadow Fade (9), Scanner (14) and
+Storm (18) remained dark when selected through software; the first two also
+left Fn indicators illuminated. They remain recognized protocol IDs, rather
+than observed native effects. Strict signature validation still rejects
+incomplete or invalid configuration reads; no retries are added.
 
 ## Stored layouts and recovery
 
