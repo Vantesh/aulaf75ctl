@@ -1,0 +1,5 @@
+# Optional; never installed by aulaf75ctl. Only the wired control interface.
+# USB device and interface attributes live on different parents: import usb_id,
+# then match its interface property rather than mixing ATTRS parent scopes.
+ACTION=="add|change", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="010c", IMPORT{builtin}="usb_id"
+ACTION=="add|change", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="258a", ENV{ID_MODEL_ID}=="010c", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"
