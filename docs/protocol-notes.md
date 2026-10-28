@@ -57,13 +57,31 @@ Volatile `0x08` is a separate real-time frame, never a static-storage stream.
 ## Charging indicator
 
 Configuration byte `0x12` was observed as `00` (Off), `01` (Blinking), `02`
-(Slow blinking), and `03` (Fixed On) through physical keyboard controls.
+(Slow blinking), and `03` (Fixed On) through physical keyboard controls and
+read-only captures, including the sequence `03 → 00 → 03`.
 Both general status and `indicator status` use the validated configuration decoder;
 unknown values remain raw diagnostics with a null mode and block indicator changes.
 `indicator mode` uses the existing configuration-only review/apply path, preserving
 all other configuration bytes and the complete RGB matrix. No-ops send no writes
-and create no snapshot. Software-write behavior remains physically unverified;
-byte readback does not establish the indicator's visible behavior.
+and create no snapshot. Changes require explicit approval with
+`--apply --review <dry-run.json>` against a fresh detailed dry-run.
+
+An explicitly approved software write changed `0x12` from `02` to `03`: HID
+accepted the write, full configuration and RGB matrix readbacks verified, and
+only that configuration byte changed. No matrix write was sent. The white
+indicator physically switched to Fixed On without USB reconnection. This verifies
+software control of Fixed On from Slow blinking, not all four software-write
+transitions. `visual_verified` remains false: the CLI cannot observe the LED.
+
+RGB key lights briefly turn off and return during persistent setting changes,
+including this indicator change. The indicator operation sends one `0x04` write
+carrying the complete 128-byte configuration, with no redundant configuration
+write, explicit reset or additional lighting refresh. F75 Studio uses the same
+configuration-write mechanism. `configuration_refresh = false` describes the
+planner's unchanged-configuration refresh decision; it does not rule out an
+internal firmware refresh. Firmware-side lighting reinitialization is the leading
+explanation, not a confirmed cause. No validated interruption-free persistent
+alternative is known; the interruption has not been established as unavoidable.
 
 ## Brightness and Storm
 
