@@ -57,6 +57,24 @@ Prefix each command with `aulaf75ctl lighting`. Palette availability depends on
 the active effect; see [protocol notes](docs/protocol-notes.md). Use `--help` for
 all options and `--version` for the installed version.
 
+## Charging indicator
+
+Modes: `off` (0x00), `blinking` (0x01), `slow-blinking` (0x02), and
+`fixed-on` (0x03), observed through physical keyboard controls.
+
+```sh
+aulaf75ctl indicator status --transport wired --json
+aulaf75ctl indicator mode slow-blinking --transport wired --dry-run --details --json > review.json
+# Inspect review.json before applying:
+aulaf75ctl indicator mode slow-blinking --transport wired --apply --review review.json --json
+```
+
+Indicator changes use the same fresh-state review, snapshot and readback checks
+as lighting changes. Only configuration byte `0x12` changes; lighting and stored
+RGB are preserved. Software-write behavior remains physically unverified.
+Schema-1 configuration JSON adds `charging_indicator` with `mode` and raw `value`;
+unknown values have a null mode and cannot be changed through indicator commands.
+
 ## Review and apply
 
 **Static RGB overwrites the stored per-key color layout.** Persistent changes

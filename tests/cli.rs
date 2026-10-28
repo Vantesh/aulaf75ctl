@@ -6,6 +6,12 @@ use std::process::Command;
 fn json_stdout_and_exit_status_are_a_client_contract() {
     for (args, code) in [
         (vec!["devices", "--unknown", "--json"], 2),
+        (vec!["indicator", "mode", "off", "--apply", "--json"], 2),
+        (vec!["indicator", "mode", "blink", "--dry-run", "--json"], 2),
+        (
+            vec!["indicator", "status", "--transport", "wireless", "--json"],
+            2,
+        ),
         (
             vec!["lighting", "color", "#89b4fa", "--dry-run", "--json"],
             0,

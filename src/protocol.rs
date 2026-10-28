@@ -122,8 +122,63 @@ pub fn require_preview_mode(config: &Configuration) -> Result<(), Error> {
     Ok(())
 }
 
+pub const INDICATOR_OFFSET: usize = 0x12;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum IndicatorMode {
+    Off = 0,
+    Blinking = 1,
+    SlowBlinking = 2,
+    FixedOn = 3,
+}
+
+impl IndicatorMode {
+    pub fn from_value(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Off),
+            1 => Some(Self::Blinking),
+            2 => Some(Self::SlowBlinking),
+            3 => Some(Self::FixedOn),
+            _ => None,
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        match text {
+            "off" => Ok(Self::Off),
+            "blinking" => Ok(Self::Blinking),
+            "slow-blinking" => Ok(Self::SlowBlinking),
+            "fixed-on" => Ok(Self::FixedOn),
+            _ => Err(Error::new(
+                "invalid_indicator_mode",
+                "Indicator mode must be off, blinking, slow-blinking, or fixed-on",
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for IndicatorMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Off => "off",
+            Self::Blinking => "blinking",
+            Self::SlowBlinking => "slow-blinking",
+            Self::FixedOn => "fixed-on",
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChargingIndicator {
+    pub mode: Option<IndicatorMode>,
+    pub value: u8,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Configuration {
+    pub charging_indicator: ChargingIndicator,
     pub length: usize,
     pub signature_valid: bool,
     pub lighting_mode: &'static str,
@@ -324,12 +379,14 @@ pub enum LightingRequest {
     Brightness(Brightness),
     Speed(Speed),
     Palette(Palette),
+    Indicator(IndicatorMode),
     Power(crate::power::Action),
 }
 
 impl LightingRequest {
     pub fn command(self) -> &'static str {
         match self {
+            Self::Indicator(_) => "indicator_mode",
             Self::Static(_) => "lighting_static",
             Self::Effect(_) => "lighting_effect",
             Self::Brightness(_) => "lighting_brightness",
@@ -368,6 +425,12 @@ impl LightingRequest {
             _ => None,
         }
     }
+    pub fn indicator(self) -> Option<IndicatorMode> {
+        match self {
+            Self::Indicator(mode) => Some(mode),
+            _ => None,
+        }
+    }
     pub fn power(self) -> Option<crate::power::Action> {
         match self {
             Self::Power(action) => Some(action),
@@ -380,6 +443,7 @@ impl LightingRequest {
         matrix_reply: &[u8],
     ) -> Result<LightingPlan, Error> {
         match self {
+            Self::Indicator(mode) => prepare_indicator(config, matrix_reply, mode),
             Self::Static(color) => prepare_static(config, matrix_reply, color),
             Self::Effect(effect) => prepare_effect(config, matrix_reply, effect),
             Self::Brightness(level) => prepare_brightness(config, matrix_reply, level),
@@ -448,6 +512,10 @@ pub fn parse_config(reply: &[u8]) -> Result<Configuration, Error> {
         .map(|c| PALETTE_NAMES[usize::from(c)])
         .unwrap_or("unknown");
     Ok(Configuration {
+        charging_indicator: ChargingIndicator {
+            mode: IndicatorMode::from_value(config[INDICATOR_OFFSET]),
+            value: config[INDICATOR_OFFSET],
+        },
         length: CONFIG_LEN,
         signature_valid: true,
         lighting_mode,
@@ -494,6 +562,10 @@ pub struct ReviewState {
 
 #[derive(Debug, Serialize)]
 pub struct LightingPlan {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_indicator: Option<IndicatorMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_indicator: Option<IndicatorMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub power: Option<crate::power::Plan>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -554,12 +626,13 @@ impl LightingPlan {
         if (self.requested_effect.is_some()
             || self.requested_brightness.is_some()
             || self.requested_speed.is_some()
-            || self.requested_palette.is_some())
+            || self.requested_palette.is_some()
+            || self.requested_indicator.is_some())
             && step == WriteStep::Matrix
         {
             return Err(Error::new(
                 "unsupported_report",
-                "Effect selection, brightness, speed and palette cannot send an RGB matrix write",
+                "Configuration-only operations cannot send an RGB matrix write",
             ));
         }
         let (command, payload): (u8, &[u8]) = match step {
@@ -572,6 +645,8 @@ impl LightingPlan {
     pub fn command(&self) -> &'static str {
         if let Some(power) = &self.power {
             power.action.command()
+        } else if self.requested_indicator.is_some() {
+            "indicator_mode"
         } else if self.requested_palette.is_some() {
             "lighting_palette"
         } else if self.requested_speed.is_some() {
@@ -587,6 +662,8 @@ impl LightingPlan {
     pub fn plan_key(&self) -> &'static str {
         if self.power.is_some() {
             "power_plan"
+        } else if self.requested_indicator.is_some() {
+            "indicator_plan"
         } else if self.requested_palette.is_some() {
             "palette_plan"
         } else if self.requested_speed.is_some() {
@@ -869,6 +946,35 @@ pub fn prepare_palette(
     ))
 }
 
+pub fn prepare_indicator(
+    config: &Configuration,
+    matrix_reply: &[u8],
+    mode: IndicatorMode,
+) -> Result<LightingPlan, Error> {
+    if config.length != CONFIG_LEN
+        || !config.signature_valid
+        || config.bytes[126..] != [0x5a, 0xa5]
+        || IndicatorMode::from_value(config.bytes[INDICATOR_OFFSET]).is_none()
+    {
+        return Err(Error::new(
+            "unsupported_indicator_configuration",
+            "Indicator selection requires a verified configuration and recognized current indicator value; no settings were changed",
+        ));
+    }
+    let matrix = parse_matrix(matrix_reply)?;
+    let mut modified = config.bytes;
+    modified[INDICATOR_OFFSET] = mode as u8;
+    Ok(build_plan(
+        config,
+        matrix,
+        modified,
+        *matrix,
+        LightingRequest::Indicator(mode),
+        None,
+        None,
+    ))
+}
+
 fn build_plan(
     config: &Configuration,
     before: &[u8; STATIC_RGB_LEN],
@@ -891,6 +997,8 @@ fn build_plan(
         steps.push(planned_packet(4, &modified));
     }
     LightingPlan {
+        previous_indicator: request.indicator().and(config.charging_indicator.mode),
+        requested_indicator: request.indicator(),
         power: None,
         rgb: request.rgb(),
         requested_effect: request.effect(),
@@ -902,8 +1010,8 @@ fn build_plan(
         requested_speed: request.speed(),
         previous_palette: request.palette().and(config.color_index_raw).map(|index| Palette { index, name: PALETTE_NAMES.get(usize::from(index)).copied().unwrap_or("unknown") }),
         requested_palette: request.palette(),
-        parameter_offset: if request.speed().is_some() || request.palette().is_some() { config.parameter_offset.map(|o| o + 1) } else { request.brightness().and(config.parameter_offset) },
-        rendering: if request.effect().is_some() || request.brightness().is_some() || request.speed().is_some() || request.palette().is_some() { "onboard_effect" } else { "onboard_self_defined" },
+        parameter_offset: if request.indicator().is_some() { Some(INDICATOR_OFFSET) } else if request.speed().is_some() || request.palette().is_some() { config.parameter_offset.map(|o| o + 1) } else { request.brightness().and(config.parameter_offset) },
+        rendering: if request.indicator().is_some() { "charging_indicator" } else if request.effect().is_some() || request.brightness().is_some() || request.speed().is_some() || request.palette().is_some() { "onboard_effect" } else { "onboard_self_defined" },
         brightness,
         persistent: true,
         approval_required: true,
@@ -1027,6 +1135,72 @@ pub fn inspect_descriptor(bytes: &[u8]) -> Option<Interface> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indicator_decoding_and_plans_preserve_lighting_and_matrix() {
+        let mut reply = config_fixture(1, 18);
+        let mut matrix = matrix_request();
+        for (i, byte) in matrix[8..392].iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        for (value, name) in [
+            (0, "off"),
+            (1, "blinking"),
+            (2, "slow_blinking"),
+            (3, "fixed_on"),
+        ] {
+            reply[8 + 0x12] = value;
+            let config = parse_config(&reply).unwrap();
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                json["charging_indicator"],
+                serde_json::json!({"mode":name,"value":value})
+            );
+            assert_eq!(json["lighting_mode"], "per_key");
+            assert_eq!(json["effect_id"], 18);
+            assert_eq!(json["mode_bytes"], serde_json::json!([1, 18, 51]));
+            for target in 0..=3 {
+                let mode = IndicatorMode::from_value(target).unwrap();
+                let plan = prepare_indicator(&config, &matrix, mode).unwrap();
+                assert_eq!(plan.command(), "indicator_mode");
+                assert_eq!(plan.plan_key(), "indicator_plan");
+                assert_eq!(plan.no_op, value == target);
+                assert_eq!(plan.parameter_offset, Some(0x12));
+                assert_eq!(plan.configuration_diff.len(), usize::from(value != target));
+                for (offset, byte) in config.bytes.iter().enumerate() {
+                    assert_eq!(
+                        plan.configuration[offset],
+                        if offset == 0x12 { target } else { *byte }
+                    );
+                }
+                assert_eq!(plan.matrix, plan.original_matrix);
+                assert_eq!(plan.matrix.as_slice(), &matrix[8..392]);
+                assert!(plan.matrix_diff.is_empty() && !plan.configuration_refresh);
+                assert_eq!(
+                    plan.steps
+                        .iter()
+                        .map(|step| step.command)
+                        .collect::<Vec<_>>(),
+                    if value == target { vec![] } else { vec![4] }
+                );
+                assert_eq!(
+                    plan.write_packet(WriteStep::Matrix).unwrap_err().code,
+                    "unsupported_report"
+                );
+            }
+        }
+        for value in [4, 255] {
+            reply[8 + 0x12] = value;
+            let config = parse_config(&reply).unwrap();
+            assert!(config.charging_indicator.mode.is_none());
+            assert_eq!(config.charging_indicator.value, value);
+            assert_eq!(config.lighting_mode, "per_key");
+            assert!(prepare_indicator(&config, &matrix, IndicatorMode::Off).is_err());
+            assert!(prepare_effect(&config, &matrix, Effect::from_id(1).unwrap()).is_ok());
+        }
+        reply[134] = 0;
+        assert_eq!(parse_config(&reply).unwrap_err().code, "invalid_signature");
+    }
 
     #[test]
     fn palette_changes_only_the_eligible_active_nibble_with_any_saved_speed() {
