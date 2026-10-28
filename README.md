@@ -70,15 +70,8 @@ aulaf75ctl indicator mode slow-blinking --transport wired --apply --review revie
 ```
 
 Indicator changes use the same fresh-state review, snapshot and readback checks
-as lighting changes and require explicit approval through `--apply --review`.
-Only configuration byte `0x12` changes; lighting settings and stored RGB are
-preserved. A guarded software change from Slow blinking (`0x02`) to Fixed On
-(`0x03`) physically switched the white indicator to Fixed On without reconnecting
-USB. Other software-write transitions have not been physically verified.
-
-Persistent setting changes, including indicator changes, briefly turn the RGB
-key lights off before restoring them. The cause is unconfirmed; no validated
-interruption-free persistent alternative is known.
+as lighting changes. Only configuration byte `0x12` changes; lighting and stored
+RGB are preserved. Software-write behavior remains physically unverified.
 Schema-1 configuration JSON adds `charging_indicator` with `mode` and raw `value`;
 unknown values have a null mode and cannot be changed through indicator commands.
 
