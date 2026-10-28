@@ -15,6 +15,10 @@ use crate::protocol::{self, Effect, LightingPlan, LightingRequest, WriteStep};
 #[derive(Serialize)]
 pub struct ApplyResult {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_indicator: Option<protocol::IndicatorMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_indicator: Option<protocol::IndicatorMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub power: Option<crate::power::Outcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_rgb: Option<[u8; 3]>,
@@ -62,6 +66,8 @@ pub struct ApplyResult {
 impl ApplyResult {
     pub fn new(request: LightingRequest) -> Self {
         Self {
+            previous_indicator: None,
+            requested_indicator: request.indicator(),
             power: request.power().map(|action| crate::power::Outcome {
                 action,
                 restoration_target: None,
@@ -126,7 +132,8 @@ pub fn load_review(path: &Path) -> Result<Value, Error> {
     }
     let review: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     let plan = review
-        .get("power_plan")
+        .get("indicator_plan")
+        .or_else(|| review.get("power_plan"))
         .or_else(|| review.get("palette_plan"))
         .or_else(|| review.get("speed_plan"))
         .or_else(|| review.get("brightness_plan"))
@@ -159,6 +166,7 @@ fn validate_review(plan: &LightingPlan, review: &Value) -> Result<(), Error> {
         || review.get("speed_result").is_some()
         || review.get("palette_result").is_some()
         || review.get("power_result").is_some()
+        || review.get("indicator_result").is_some()
         || review[plan.plan_key()] != expected
     {
         return Err(Error::new(
@@ -209,6 +217,7 @@ pub fn execute(
                 restoration_status: p.restoration_status,
             });
         }
+        result.previous_indicator = plan.previous_indicator;
         result.previous_effect = plan.previous_effect;
         result.active_effect = plan.active_effect;
         result.previous_brightness = plan.previous_brightness;
@@ -307,6 +316,8 @@ pub fn save_snapshot(plan: &LightingPlan) -> Result<PathBuf, Error> {
         "{}-{}-{}-{}.json",
         if let Some(power) = &plan.power {
             power.action.snapshot_prefix()
+        } else if plan.requested_indicator.is_some() {
+            "indicator"
         } else if plan.requested_palette.is_some() {
             "palette"
         } else if plan.requested_speed.is_some() {
@@ -414,6 +425,13 @@ fn save_snapshot_at(
         snapshot["metadata"]["intended_operation"]["previous_palette"] =
             json!(plan.previous_palette);
         snapshot["metadata"]["intended_operation"]["requested_palette"] = json!(palette);
+        snapshot["metadata"]["intended_operation"]["parameter_offset"] =
+            json!(plan.parameter_offset);
+    }
+    if let Some(mode) = plan.requested_indicator {
+        snapshot["metadata"]["intended_operation"]["previous_indicator"] =
+            json!(plan.previous_indicator);
+        snapshot["metadata"]["intended_operation"]["requested_indicator"] = json!(mode);
         snapshot["metadata"]["intended_operation"]["parameter_offset"] =
             json!(plan.parameter_offset);
     }
@@ -949,6 +967,13 @@ mod tests {
         request: LightingRequest,
     ) -> (ApplyResult, Vec<String>) {
         let (mut model, mut config, mut matrix, _, _) = fixture();
+        if let Some(mode) = request.indicator() {
+            config[8 + 0x12] = if case == "indicator_noop" {
+                mode as u8
+            } else {
+                3
+            };
+        }
         if let Some(effect) = request.effect() {
             for slot in 0..20 {
                 config[8 + 58 + slot * 2] = 9;
@@ -1006,6 +1031,9 @@ mod tests {
                 config[8 + 9] = 1;
                 config[8 + 10] = 21;
             }
+            "unknown_indicator" => config[8 + 0x12] = 255,
+            "indicator_changed" => config[8 + 0x12] = 1,
+            "wrong_indicator" => review["indicator_plan"]["requested_indicator"] = json!("off"),
             "wrong_review" => review["command"] = json!("status"),
             "wrong_brightness" => review["brightness_plan"]["requested_brightness"] = json!(6),
             "wrong_speed" => review["speed_plan"]["requested_speed"] = json!(1),
@@ -1325,6 +1353,84 @@ mod tests {
             } else {
                 assert!(result.snapshot_path.is_none());
             }
+        }
+    }
+
+    #[test]
+    fn indicator_uses_existing_review_snapshot_and_readback_guards() {
+        let request = LightingRequest::Indicator(protocol::IndicatorMode::SlowBlinking);
+        let (result, trace) = synthetic_request("indicator", "", request);
+        assert!(result.error.is_none() && !result.no_op);
+        assert_eq!(
+            result.previous_indicator,
+            Some(protocol::IndicatorMode::FixedOn)
+        );
+        assert_eq!(
+            result.requested_indicator,
+            Some(protocol::IndicatorMode::SlowBlinking)
+        );
+        assert_eq!(
+            serde_json::to_value(&result.configuration_diff).unwrap(),
+            json!([{"offset":18,"old":3,"new":2}])
+        );
+        assert_eq!(result.matrix_write, "skipped_unchanged");
+        assert_eq!(result.configuration_write, "accepted");
+        assert_eq!(result.configuration_readback, "verified");
+        assert_eq!(result.matrix_readback, "verified");
+        assert!(!result.hardware_verified && !result.visual_verified);
+        assert_eq!(
+            trace,
+            [
+                "read:Model",
+                "read:Configuration",
+                "read:StaticMatrix",
+                "snapshot",
+                "write:Configuration",
+                "read:StaticMatrix",
+                "read:Configuration"
+            ]
+        );
+        let (result, trace) = synthetic_request("indicator_noop", "", request);
+        assert!(result.error.is_none() && result.no_op && result.snapshot_path.is_none());
+        assert!(
+            trace
+                .iter()
+                .all(|s| !s.starts_with("write:") && s != "snapshot")
+        );
+        for (failure, code, writes) in [
+            ("model", "unsupported_model", 0),
+            ("signature", "invalid_signature", 0),
+            (
+                "unknown_indicator",
+                "unsupported_indicator_configuration",
+                0,
+            ),
+            ("indicator_changed", "review_mismatch", 0),
+            ("wrong_indicator", "review_mismatch", 0),
+            ("stale_config", "review_mismatch", 0),
+            ("stale_matrix", "review_mismatch", 0),
+            ("wrong_review", "review_mismatch", 0),
+            ("matrix_header", "unexpected_matrix_reply", 0),
+            ("controller_preflight", "competing_controller", 0),
+            ("snapshot", "snapshot_failed", 0),
+            ("configuration_write", "device_io", 1),
+            (
+                "configuration_mismatch",
+                "configuration_readback_mismatch",
+                1,
+            ),
+            ("matrix_mismatch", "matrix_readback_mismatch", 1),
+            ("signature_readback", "invalid_signature", 1),
+        ] {
+            let (result, trace) = synthetic_request("indicator", failure, request);
+            assert_eq!(result.error.unwrap().code, code, "{failure}");
+            assert_eq!(
+                trace.iter().filter(|s| s.starts_with("write:")).count(),
+                writes,
+                "{failure}"
+            );
+            assert!(!trace.iter().any(|s| s == "write:Matrix"));
+            assert_eq!(result.snapshot_path.is_some(), writes != 0);
         }
     }
 
@@ -1732,6 +1838,41 @@ mod tests {
             .unwrap()
             .remove("review_state");
         fs::write(&review_path, serde_json::to_vec(&palette_review).unwrap()).unwrap();
+        assert_eq!(
+            load_review(&review_path).unwrap_err().code,
+            "incomplete_review"
+        );
+        let mut indicator_config = config.clone();
+        indicator_config[8 + 0x12] = 3;
+        let indicator_plan = protocol::prepare_indicator(
+            &protocol::parse_config(&indicator_config).unwrap(),
+            &matrix,
+            protocol::IndicatorMode::SlowBlinking,
+        )
+        .unwrap();
+        let indicator_path =
+            save_snapshot_at(&base, "indicator.json", 125, &indicator_plan).unwrap();
+        let snapshot: Value = serde_json::from_slice(&fs::read(indicator_path).unwrap()).unwrap();
+        let intended = &snapshot["metadata"]["intended_operation"];
+        assert_eq!(intended["command"], "indicator_mode");
+        assert_eq!(intended["requested_indicator"], "slow_blinking");
+        assert_eq!(intended["configuration_offsets"], json!([18]));
+        assert_eq!(
+            snapshot["raw"]["configuration"],
+            json!(indicator_plan.original_configuration.as_slice())
+        );
+        assert_eq!(
+            snapshot["raw"]["matrix"],
+            json!(indicator_plan.original_matrix.as_slice())
+        );
+        let mut indicator_review = json!({"schema_version":1,"command":"indicator_mode","ok":true,"error":null,"indicator_plan":indicator_plan});
+        fs::write(&review_path, serde_json::to_vec(&indicator_review).unwrap()).unwrap();
+        assert_eq!(load_review(&review_path).unwrap(), indicator_review);
+        indicator_review["indicator_plan"]
+            .as_object_mut()
+            .unwrap()
+            .remove("review_state");
+        fs::write(&review_path, serde_json::to_vec(&indicator_review).unwrap()).unwrap();
         assert_eq!(
             load_review(&review_path).unwrap_err().code,
             "incomplete_review"

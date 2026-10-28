@@ -718,6 +718,15 @@ fn record_static_result(device: &mut Device, result: &mut crate::static_write::A
             "palette_readback_verified_unobserved"
         });
     }
+    if result.requested_indicator.is_some() {
+        device.operation_state = Some(if result.error.is_some() {
+            "indicator_apply_failed"
+        } else if result.no_op {
+            "indicator_no_op_verified"
+        } else {
+            "indicator_readback_verified_unobserved"
+        });
+    }
     if let Some(power) = &result.power {
         device.operation_state = Some(match (power.action, result.error.is_some(), result.no_op) {
             (crate::power::Action::Off, true, _) => "power_off_failed",
@@ -994,6 +1003,8 @@ mod tests {
             palette_result: None,
             power_plan: None,
             power_result: None,
+            indicator_plan: None,
+            indicator_result: None,
         };
         let mut inspections = 0;
         let ambiguous = apply_lighting(

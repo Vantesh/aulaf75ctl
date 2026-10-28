@@ -58,6 +58,10 @@ struct Report {
     power_plan: Option<protocol::LightingPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     power_result: Option<static_write::ApplyResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    indicator_plan: Option<protocol::LightingPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    indicator_result: Option<static_write::ApplyResult>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +81,7 @@ struct Lighting {
 
 fn run(options: cli::Options) -> Report {
     let request = match &options.command {
+        cli::Command::Indicator(mode) => Some(protocol::LightingRequest::Indicator(*mode)),
         cli::Command::Static(color) => Some(protocol::LightingRequest::Static(*color)),
         cli::Command::Effect(effect) => Some(protocol::LightingRequest::Effect(*effect)),
         cli::Command::Brightness(level) => Some(protocol::LightingRequest::Brightness(*level)),
@@ -88,8 +93,10 @@ fn run(options: cli::Options) -> Report {
     };
     let name = match options.command {
         cli::Command::Devices => "devices",
+        cli::Command::IndicatorStatus => "indicator_status",
         cli::Command::Color(_) => "lighting_color",
         cli::Command::Static(_)
+        | cli::Command::Indicator(_)
         | cli::Command::Effect(_)
         | cli::Command::Brightness(_)
         | cli::Command::Speed(_)
@@ -120,6 +127,8 @@ fn run(options: cli::Options) -> Report {
         palette_result: None,
         power_plan: None,
         power_result: None,
+        indicator_plan: None,
+        indicator_result: None,
         lighting: color.map(|color| Lighting {
             rgb: color.0,
             command: 8,
@@ -165,11 +174,13 @@ fn run(options: cli::Options) -> Report {
     } else {
         None
     };
-    let transport = if color.is_some() || request.is_some() {
-        Some(device::Transport::Wired)
-    } else {
-        options.transport
-    };
+    let transport =
+        if color.is_some() || request.is_some() || options.command == cli::Command::IndicatorStatus
+        {
+            Some(device::Transport::Wired)
+        } else {
+            options.transport
+        };
     match device::discover(transport) {
         Ok(devices) => report.devices = devices,
         Err(error) => {
@@ -178,6 +189,7 @@ fn run(options: cli::Options) -> Report {
         }
     }
     if let Some(request) = request {
+        let indicator = request.indicator().is_some();
         let effect = request.effect().is_some();
         let brightness = request.brightness().is_some();
         let speed = request.speed().is_some();
@@ -188,7 +200,9 @@ fn run(options: cli::Options) -> Report {
                 device::apply_lighting(&mut report.devices, request, review.as_ref().unwrap());
             report.ok = result.error.is_none();
             report.error = result.error.clone();
-            if power {
+            if indicator {
+                report.indicator_result = Some(result);
+            } else if power {
                 report.power_result = Some(result);
             } else if palette {
                 report.palette_result = Some(result);
@@ -205,7 +219,9 @@ fn run(options: cli::Options) -> Report {
             match device::prepare_lighting(&mut report.devices, request) {
                 Ok(plan) => {
                     report.ok = true;
-                    if power {
+                    if indicator {
+                        report.indicator_plan = Some(plan);
+                    } else if power {
                         report.power_plan = Some(plan);
                     } else if palette {
                         report.palette_plan = Some(plan);
@@ -328,6 +344,8 @@ fn main() -> ExitCode {
                 palette_result: None,
                 power_plan: None,
                 power_result: None,
+                indicator_plan: None,
+                indicator_result: None,
             },
             true,
         ),
@@ -387,6 +405,17 @@ fn main() -> ExitCode {
                             .map_or_else(|| "unknown".into(), |c| c.to_string())
                     )?;
                 }
+                if let Some(config) = &device.configuration {
+                    writeln!(
+                        out,
+                        "  Charging indicator: {} (0x{:02x})",
+                        config
+                            .charging_indicator
+                            .mode
+                            .map_or_else(|| "unknown".into(), |mode| mode.to_string()),
+                        config.charging_indicator.value
+                    )?;
+                }
                 if let Some(model) = &device.model {
                     writeln!(
                         out,
@@ -421,6 +450,7 @@ fn main() -> ExitCode {
                 .or(report.speed_plan.as_ref())
                 .or(report.palette_plan.as_ref())
                 .or(report.power_plan.as_ref())
+                .or(report.indicator_plan.as_ref())
             {
                 print_lighting_plan(&mut out, plan)?;
             }
@@ -432,6 +462,7 @@ fn main() -> ExitCode {
                 .or(report.speed_result.as_ref())
                 .or(report.palette_result.as_ref())
                 .or(report.power_result.as_ref())
+                .or(report.indicator_result.as_ref())
             {
                 if let Some(power) = &result.power {
                     writeln!(
@@ -445,6 +476,12 @@ fn main() -> ExitCode {
                     if let Some(target) = power.restoration_target {
                         writeln!(out, "  Restoration target: {} ({})", target.name, target.id)?;
                     }
+                } else if let Some(mode) = result.requested_indicator {
+                    writeln!(
+                        out,
+                        "Indicator apply: {mode}; configuration {}, matrix {}",
+                        result.configuration_write, result.matrix_write
+                    )?;
                 } else if let Some(palette) = result.requested_palette {
                     writeln!(
                         out,
@@ -582,6 +619,13 @@ fn print_lighting_plan(out: &mut impl Write, plan: &protocol::LightingPlan) -> i
                 target.name, target.id
             )?;
         }
+    } else if let Some(mode) = plan.requested_indicator {
+        writeln!(
+            out,
+            "Indicator plan at configuration[0x12]: {} -> {mode}; no-op {}",
+            plan.previous_indicator.unwrap(),
+            plan.no_op
+        )?;
     } else if let Some(palette) = plan.requested_palette {
         let effect = plan.active_effect.expect("palette plan has active effect");
         let previous = plan
@@ -690,6 +734,7 @@ fn json_report(report: &Report, details: bool) -> Result<serde_json::Value, serd
         .or(report.speed_plan.as_ref())
         .or(report.palette_plan.as_ref())
         .or(report.power_plan.as_ref())
+        .or(report.indicator_plan.as_ref())
     {
         value["review_ready"] = details.into();
         if !details {
@@ -772,6 +817,8 @@ mod tests {
             palette_result: None,
             power_plan: None,
             power_result: None,
+            indicator_plan: None,
+            indicator_result: None,
         };
         let summary = json_report(&report, false).unwrap();
         assert_eq!(summary["review_ready"], false);
@@ -951,6 +998,41 @@ mod tests {
                 .len(),
             1040
         );
+        let indicator_plan = protocol::prepare_indicator(
+            &protocol::parse_config(&config).unwrap(),
+            &matrix,
+            protocol::IndicatorMode::SlowBlinking,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        print_lighting_plan(&mut out, &indicator_plan).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("Indicator plan at configuration[0x12]: off -> slow-blinking")
+        );
+        let report = Report {
+            command: "indicator_mode",
+            palette_plan: None,
+            indicator_plan: Some(indicator_plan),
+            ..report
+        };
+        let summary = json_report(&report, false).unwrap();
+        assert_eq!(summary["schema_version"], 1);
+        assert_eq!(
+            summary["indicator_plan"]["requested_indicator"],
+            "slow_blinking"
+        );
+        assert_eq!(summary["indicator_plan"]["matrix_changed_bytes"], 0);
+        assert!(summary["indicator_plan"].get("review_state").is_none());
+        assert!(
+            summary["indicator_plan"]["steps"][0]
+                .get("packet_hex")
+                .is_none()
+        );
+        let detailed = json_report(&report, true).unwrap();
+        assert!(detailed["indicator_plan"]["review_state"]["configuration_hex"].is_string());
+        assert!(detailed["indicator_plan"]["steps"][0]["packet_hex"].is_string());
     }
 
     #[test]
@@ -1004,6 +1086,8 @@ mod tests {
             palette_result: None,
             power_plan: None,
             power_result: None,
+            indicator_plan: None,
+            indicator_result: None,
         };
         let output = json_report(&report, false).unwrap();
         assert_eq!(output["schema_version"], 1);

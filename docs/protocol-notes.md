@@ -24,6 +24,7 @@ report). Required signature: offsets 126/127 = `5a a5`.
 | 9 | Selector: Studio writes 1 for Self-defined, otherwise 0 |
 | 10 | Stored native-effect ID; active only when selector 9 is 0 |
 | 11 | Unverified additional field; preserved |
+| `0x12` | Charging indicator: 0 Off, 1 Blinking, 2 Slow blinking, 3 Fixed On |
 | `58 + 2*slot` | Saved brightness, levels 0–9 |
 | `59 + 2*slot` | Speed in high nibble (0–4), palette in low nibble (0–7), where applicable |
 | 58/59 | Fixed On, slot 0 |
@@ -52,6 +53,17 @@ the CLI keeps that refresh for changed colors.
 A same-color, same-mode verified request is a zero-write no-op. Native effect
 selection and individual parameters use configuration-only read/modify/write.
 Volatile `0x08` is a separate real-time frame, never a static-storage stream.
+
+## Charging indicator
+
+Configuration byte `0x12` was observed as `00` (Off), `01` (Blinking), `02`
+(Slow blinking), and `03` (Fixed On) through physical keyboard controls.
+Both general status and `indicator status` use the validated configuration decoder;
+unknown values remain raw diagnostics with a null mode and block indicator changes.
+`indicator mode` uses the existing configuration-only review/apply path, preserving
+all other configuration bytes and the complete RGB matrix. No-ops send no writes
+and create no snapshot. Software-write behavior remains physically unverified;
+byte readback does not establish the indicator's visible behavior.
 
 ## Brightness and Storm
 

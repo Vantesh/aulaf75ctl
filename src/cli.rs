@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::{
     Error,
     device::Transport,
-    protocol::{Brightness, Color, Effect, LightingRequest, Palette, Speed},
+    protocol::{Brightness, Color, Effect, IndicatorMode, LightingRequest, Palette, Speed},
 };
 
 pub const HELP: &str = "aulaf75ctl — guarded wired AULA F75 lighting control (Linux)
@@ -23,6 +23,9 @@ Usage: aulaf75ctl [--json] [--transport wired|wireless] <devices|status>
        aulaf75ctl --help
        aulaf75ctl [--json] lighting <off|on> --dry-run [--details] --transport wired
        aulaf75ctl [--json] lighting <off|on> --apply --review <dry-run.json> --transport wired
+       aulaf75ctl indicator status --transport wired [--json]
+       aulaf75ctl indicator mode <off|blinking|slow-blinking|fixed-on> --transport wired --dry-run [--details --json]
+       aulaf75ctl indicator mode <mode> --transport wired --apply --review <dry-run.json> [--json]
        aulaf75ctl --version
 
 devices   Passive USB HID discovery; sends no protocol requests
@@ -47,6 +50,7 @@ Palettes: red(0), green(1), blue(2), yellow(3), magenta(4), cyan(5), white(6), r
 Palette selection preserves speed and requires a palette-capable active effect.
 Off selects native effect 0; On restores a verified target for the same USB instance.
 Session restoration ends on USB re-enumeration or reboot; no startup restoration.
+Indicator mode changes only configuration byte 0x12; software-write behavior is physically unverified.
 Close other keyboard-control applications before requesting status or a preview.
 Run as your normal desktop user, never with sudo.";
 
@@ -54,6 +58,8 @@ Run as your normal desktop user, never with sudo.";
 pub enum Command {
     Devices,
     Status,
+    IndicatorStatus,
+    Indicator(IndicatorMode),
     Color(Color),
     Static(Color),
     Effect(Effect),
@@ -145,6 +151,7 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
             "static" | "effect" | "brightness" | "speed" | "palette",
             _
         ] | ["lighting", "off" | "on"]
+            | ["indicator", "mode", _]
     );
     if details && (!dry_run || !json || !persistent) {
         return Err(Error::new(
@@ -160,6 +167,9 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
             ));
         }
         let request = match positional.as_slice() {
+            ["indicator", "mode", value] => {
+                LightingRequest::Indicator(IndicatorMode::parse(value)?)
+            }
             ["lighting", "static", value] => LightingRequest::Static(Color::parse(value)?),
             ["lighting", "effect", value] => LightingRequest::Effect(Effect::parse(value)?),
             ["lighting", "brightness", value] => {
@@ -191,6 +201,7 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
             ));
         }
         match request {
+            LightingRequest::Indicator(mode) => Command::Indicator(mode),
             LightingRequest::Static(color) => Command::Static(color),
             LightingRequest::Effect(effect) => Command::Effect(effect),
             LightingRequest::Brightness(level) => Command::Brightness(level),
@@ -202,6 +213,15 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
         match positional.as_slice() {
             ["devices"] => Command::Devices,
             ["status"] => Command::Status,
+            ["indicator", "status"] => {
+                if transport == Some(Transport::Wireless) {
+                    return Err(Error::new(
+                        "unsupported_transport",
+                        "Charging indicator control is wired-only",
+                    ));
+                }
+                Command::IndicatorStatus
+            }
             ["lighting", "color", rgb] => {
                 if transport == Some(Transport::Wireless) {
                     return Err(Error::new(
@@ -215,7 +235,7 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
             _ => {
                 return Err(Error::new(
                     "invalid_arguments",
-                    "Expected devices, status, or lighting color/static/effect/brightness/speed/palette/off/on; see --help",
+                    "Expected devices, status, indicator status/mode, or lighting color/static/effect/brightness/speed/palette/off/on; see --help",
                 ));
             }
         }
@@ -236,6 +256,7 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
                 | Command::Speed(_)
                 | Command::Palette(_)
                 | Command::Power(_)
+                | Command::Indicator(_)
         )
     {
         return Err(Error::new(
@@ -253,6 +274,82 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indicator_commands_require_exact_names_and_wired_review() {
+        let args = ["indicator", "status", "--transport", "wired", "--json"].map(String::from);
+        assert_eq!(parse(&args).unwrap().command, Command::IndicatorStatus);
+        for (name, mode) in [
+            ("off", IndicatorMode::Off),
+            ("blinking", IndicatorMode::Blinking),
+            ("slow-blinking", IndicatorMode::SlowBlinking),
+            ("fixed-on", IndicatorMode::FixedOn),
+        ] {
+            let args = [
+                "indicator",
+                "mode",
+                name,
+                "--dry-run",
+                "--details",
+                "--json",
+                "--transport",
+                "wired",
+            ]
+            .map(String::from);
+            assert_eq!(parse(&args).unwrap().command, Command::Indicator(mode));
+            let args =
+                ["indicator", "mode", name, "--apply", "--review", "r.json"].map(String::from);
+            assert_eq!(
+                parse(&args).unwrap().command,
+                Command::Apply {
+                    request: LightingRequest::Indicator(mode),
+                    review: PathBuf::from("r.json")
+                }
+            );
+        }
+        for name in [
+            "0",
+            "3",
+            "on",
+            "blink",
+            "slow_blinking",
+            "fixed_on",
+            "Fixed-On",
+            "OFF",
+            "",
+        ] {
+            let args = ["indicator", "mode", name, "--dry-run"].map(String::from);
+            assert!(parse(&args).is_err(), "{name}");
+        }
+        for args in [
+            vec!["indicator", "mode", "off"],
+            vec!["indicator", "mode", "off", "--apply"],
+            vec!["indicator", "mode", "off", "--review", "r.json"],
+            vec!["indicator", "mode", "off", "--dry-run", "--details"],
+            vec![
+                "indicator",
+                "mode",
+                "off",
+                "--dry-run",
+                "--apply",
+                "--review",
+                "r.json",
+            ],
+            vec![
+                "indicator",
+                "mode",
+                "off",
+                "--dry-run",
+                "--transport",
+                "wireless",
+            ],
+            vec!["indicator", "status", "--transport", "wireless"],
+            vec!["indicator", "status", "--dry-run"],
+            vec!["indicator", "status", "--apply", "--review", "r.json"],
+        ] {
+            assert!(parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
+        }
+    }
 
     #[test]
     fn power_requires_operation_specific_wired_review_authorization() {
