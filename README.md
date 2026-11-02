@@ -30,8 +30,17 @@ cargo install --path . --locked
 ```
 
 Run as your normal desktop user, without sudo. If HID access is denied, see the
-optional [udev rule](packaging/70-aulaf75ctl.rules) for wired/receiver interface 1. It is
-not installed automatically.
+[udev rule](packaging/70-aulaf75ctl.rules) for wired and receiver interface 1.
+`cargo install` does not install system rules. Install it once with administrator
+privileges, then unplug and reconnect the receiver or wired keyboard:
+
+```sh
+sudo install -m 0644 packaging/70-aulaf75ctl.rules /etc/udev/rules.d/70-aulaf75ctl.rules
+sudo udevadm control --reload-rules
+```
+
+The rule grants access to the active local user through `uaccess`; subsequent
+commands run without sudo. A local logind/seat session is required.
 
 ## Commands
 
