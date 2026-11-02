@@ -476,7 +476,17 @@ pub fn parse_config(reply: &[u8]) -> Result<Configuration, Error> {
             ),
         ));
     }
-    let config = &reply[8..8 + CONFIG_LEN];
+    parse_config_payload(&reply[8..8 + CONFIG_LEN])
+}
+
+// Shared configuration fields, decoded only after transport-specific framing.
+pub fn parse_config_payload(config: &[u8]) -> Result<Configuration, Error> {
+    if config.len() != CONFIG_LEN {
+        return Err(Error::new(
+            "malformed_reply",
+            "Expected a complete 128-byte configuration",
+        ));
+    }
     if config[126..] != [0x5a, 0xa5] {
         return Err(Error::new(
             "invalid_signature",
@@ -563,6 +573,8 @@ pub struct ReviewState {
 #[derive(Debug, Serialize)]
 pub struct LightingPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<crate::device::Transport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_indicator: Option<IndicatorMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_indicator: Option<IndicatorMode>,
@@ -623,6 +635,12 @@ impl LightingPlan {
     // Only these two packets can enter the explicit static-apply path. Bytes
     // always come from fresh, validated reads, never from the review file.
     pub fn write_packet(&self, step: WriteStep) -> Result<[u8; REPORT_LEN], Error> {
+        if self.transport == Some(crate::device::Transport::Wireless) {
+            return Err(Error::new(
+                "unsupported_report",
+                "Wireless plans cannot produce wired feature reports",
+            ));
+        }
         if (self.requested_effect.is_some()
             || self.requested_brightness.is_some()
             || self.requested_speed.is_some()
@@ -997,6 +1015,7 @@ fn build_plan(
         steps.push(planned_packet(4, &modified));
     }
     LightingPlan {
+        transport: None,
         previous_indicator: request.indicator().and(config.charging_indicator.mode),
         requested_indicator: request.indicator(),
         power: None,

@@ -1,6 +1,6 @@
 # aulaf75ctl
 
-Linux CLI for AULA F75 lighting over USB. Set static RGB, select onboard effects,
+Linux CLI for AULA F75 lighting over wired USB and its 2.4 GHz receiver. Set static RGB, select onboard effects,
 and adjust brightness, speed and palettes without running a background service.
 
 Tested on an AULA F75 over USB: static RGB, Fixed On and Rainbow, Fixed On
@@ -30,8 +30,17 @@ cargo install --path . --locked
 ```
 
 Run as your normal desktop user, without sudo. If HID access is denied, see the
-optional [udev rule](packaging/70-aulaf75ctl.rules) for wired interface 1. It is
-not installed automatically.
+[udev rule](packaging/70-aulaf75ctl.rules) for wired and receiver interface 1.
+`cargo install` does not install system rules. Install it once with administrator
+privileges, then unplug and reconnect the receiver or wired keyboard:
+
+```sh
+sudo install -m 0644 packaging/70-aulaf75ctl.rules /etc/udev/rules.d/70-aulaf75ctl.rules
+sudo udevadm control --reload-rules
+```
+
+The rule grants access to the active local user through `uaccess`; subsequent
+commands run without sudo. A local logind/seat session is required.
 
 ## Commands
 
@@ -56,6 +65,44 @@ aulaf75ctl lighting static '#89b4fa' --dry-run --json
 Prefix each command with `aulaf75ctl lighting`. Palette availability depends on
 the active effect; see [protocol notes](docs/protocol-notes.md). Use `--help` for
 all options and `--version` for the installed version.
+
+## 2.4 GHz receiver
+
+The connected Compx `3554:fa09` receiver, interface 1, was tested with native
+effect selection, brightness, speed and palette changes, including exact RGB and
+configuration readbacks and restoration of the original state. Physical appearance
+and persistence across power cycles were not verified. `devices` remains passive;
+`status --transport wireless` requests configuration and verifies its signature.
+An asleep or out-of-range keyboard may not answer; wake it before running commands.
+
+```sh
+aulaf75ctl status --transport wireless --json
+aulaf75ctl lighting effect rainbow --transport wireless --dry-run --details --json > review.json
+# Inspect the review, then apply that exact request:
+aulaf75ctl lighting effect rainbow --transport wireless --apply --review review.json --json
+```
+
+| Feature | Wired | 2.4 GHz |
+| --- | --- | --- |
+| Configuration/status | Yes, with model query | Yes; model identity remains unknown |
+| Native effects 0–18, brightness, speed, palettes | Yes | Yes, same review/apply workflow |
+| Stored uniform RGB / Self-defined selection | Yes | Disabled: per-key write trailer/parameter layout unverified |
+| `color` volatile preview | Yes, physical behavior unverified | Encoded/tested; requires existing exact `[1,21]` mode; physical behavior unverified |
+| Charging indicator | Yes | Disabled: mapping unverified |
+| Session `off` / `on` restoration | Yes | Disabled: receiver identity does not identify a keyboard radio session |
+
+Use `lighting effect off` over wireless to select Off; select an explicit effect
+to turn lighting on again. Persistent commands prefer wired when both transports
+are present, otherwise one receiver; `--transport` selects explicitly. Multiple
+receivers are rejected. Volatile `color` retains its wired default; specify
+`--transport wireless` for the radio preview, including hardware-free dry-runs.
+Bluetooth is unsupported.
+
+Wireless reads retry at most once with a fresh assembly after timeout/missing
+fragments. Configuration fragments are never retried. An interrupted write has an
+uncertain outcome: keep its snapshot and inspect fresh state before another
+operation. No palette templates, save/reset commands or guessed model queries
+are sent. See [wireless protocol and validation notes](docs/wireless.md).
 
 ## Charging indicator
 
@@ -102,7 +149,7 @@ Changed static colors retain the matrix-then-configuration refresh.
 Snapshots are saved under `$XDG_STATE_HOME/aulaf75ctl` (default
 `~/.local/state/aulaf75ctl`). Results include the snapshot path and write/readback
 outcomes. On failure, stop and keep
-those files: there are no automatic retries or rollback. See the
+those files: configuration writes are never retried or rolled back automatically. See the
 [recovery guide](docs/session-lighting-power.md).
 
 `--json` returns one schema-1 result on stdout; diagnostics go to stderr. Exit
@@ -112,8 +159,9 @@ Readback success verifies stored bytes, not visible lighting.
 
 ## Limits
 
-- Wired control: `258a:010c`, interface 1, with descriptor/model checks. Receiver
-  `3554:fa09` detection is passive; wireless control and Bluetooth are unsupported.
+- Wired control: `258a:010c`, interface 1, with descriptor/model checks. Wireless
+  control: `3554:fa09`, interface 1, with descriptor and complete response checks.
+  Other receiver IDs/variants are not assumed compatible.
 - Self-defined brightness saves correctly but did not visibly dim LEDs, including
   in Studio.
 - Off/On restoration needs the same USB device instance. This F75 has no USB

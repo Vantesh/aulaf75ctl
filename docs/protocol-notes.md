@@ -110,16 +110,16 @@ snapshot. Studio profiles include sleep, keymaps and macros as well as lighting,
 so applying a profile is not a lighting-only restore. Other color groups are not
 known backups.
 
-## Receiver protocol boundary (reference only)
+## Receiver protocol boundary
 
 Studio's `3554:fa09` transport uses 20-byte output/input packets, report `0x13`,
 usage page `0xff02`, read flag `0x40`. Configuration is `04/44`, stored RGB `02/42`,
 palette table `09/49`, volatile RGB `88`. Bytes 1–4 encode command, total chunks,
 chunk index and packed subcommand/length; 5–18 hold up to 14 bytes; byte 19 sums
-0–18 modulo 256. Future work must filter multiplexed reports, validate checksums
-and assemble complete ordered chunks. `0x07` queries connectivity, not battery;
-**receiver `0x06` is reset**, not the wired RGB command. Do not reuse wired packets
-or adopt Studio's persistent retries.
+0–18 modulo 256. The native receiver backend filters multiplexed reports, validates checksums
+and assembles every indexed chunk; see [wireless support](wireless.md). `0x07` queries connectivity, not battery;
+**receiver `0x06` is reset**, not the wired RGB command. Wired packets are never sent to the receiver. Configuration writes are never
+retried; only reads may start one fresh attempt.
 
 Supplementary references: [Keylux protocol](https://github.com/SibteProf/keylux/blob/9817718e93b5ee129f221cb6fe3f59db025aa078/docs/PROTOCOL.md)
 for framing/signatures/storage versus volatile operations;
