@@ -1,9 +1,10 @@
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use nix::{ioctl_read, ioctl_readwrite};
 use serde::Serialize;
@@ -171,31 +172,29 @@ fn matches_transport(shape: Interface, transport: Transport) -> bool {
 pub fn inspect(devices: &mut [Device]) {
     // One lock across this user's CLI invocations, held across complete exchanges
     // and pacing. Other vendor programs must be closed; they do not share it.
-    let lock = if devices
-        .iter()
-        .any(|d| d.transport == Transport::Wired && d.interface_verified)
-    {
+    let lock = if devices.iter().any(|d| d.interface_verified) {
         Some(command_lock())
     } else {
         None
     };
+    inspect_with(devices, |device| match &lock {
+        Some(Ok(_guard)) if device.transport == Transport::Wireless => {
+            read_wireless(device).map(|config| (config, None))
+        }
+        Some(Ok(_guard)) => read_wired(device).map(|(config, model)| (config, Some(model))),
+        Some(Err(error)) => Err(error.clone()),
+        None => unreachable!(),
+    });
+}
+
+type Status = (Configuration, Option<Result<protocol::Model, Error>>);
+
+fn inspect_with(devices: &mut [Device], mut read: impl FnMut(&Device) -> Result<Status, Error>) {
     for device in devices {
         if !device.interface_verified {
             continue;
         }
-        if device.transport == Transport::Wireless {
-            device.state = "receiver_present";
-            device.error = Some(Error::new(
-                "wireless_status_unavailable",
-                "Receiver detected; keyboard connection, pairing and configuration are unknown (radio probing is disabled)",
-            ));
-            continue;
-        }
-        let result = match &lock {
-            Some(Ok(_guard)) => read_wired(device),
-            Some(Err(error)) => Err(error.clone()),
-            None => unreachable!(),
-        };
+        let result = read(device);
         match result {
             Ok((configuration, model)) => {
                 device.state = "verified_read_only";
@@ -204,8 +203,9 @@ pub fn inspect(devices: &mut [Device]) {
                 device.capabilities.read_configuration = true;
                 device.configuration = Some(configuration);
                 match model {
-                    Ok(model) => device.model = Some(model),
-                    Err(error) => device.model_error = Some(error),
+                    Some(Ok(model)) => device.model = Some(model),
+                    Some(Err(error)) => device.model_error = Some(error),
+                    None => {}
                 }
                 update_brightness_capability(device);
             }
@@ -327,10 +327,20 @@ fn read_status(file: &File) -> Result<WiredStatus, Error> {
 }
 
 fn open_wired(device: &Device) -> Result<File, Error> {
-    if device.transport != Transport::Wired || !device.interface_verified {
+    if device.transport != Transport::Wired {
         return Err(Error::new(
             "unverified_interface",
-            "Wired reads require a verified wired control interface",
+            "Expected a wired control interface",
+        ));
+    }
+    open_control(device)
+}
+
+fn open_control(device: &Device) -> Result<File, Error> {
+    if !device.interface_verified {
+        return Err(Error::new(
+            "unverified_interface",
+            "Reads require a verified control interface",
         ));
     }
     let file = OpenOptions::new()
@@ -362,12 +372,12 @@ fn open_wired(device: &Device) -> Result<File, Error> {
         raw_info(file.as_raw_fd(), &mut info).map_err(|e| io_error(e.into()))?;
         descriptor_size(file.as_raw_fd(), &mut size).map_err(|e| io_error(e.into()))?;
     }
-    if identify(info.bus, info.vendor as u16, info.product as u16) != Some(Transport::Wired)
+    if identify(info.bus, info.vendor as u16, info.product as u16) != Some(device.transport)
         || !(1..=4096).contains(&size)
     {
         return Err(Error::new(
             "unverified_interface",
-            "Opened device no longer matches the wired candidate",
+            "Opened device no longer matches the discovered transport",
         ));
     }
     descriptor.size = size as u32;
@@ -381,14 +391,14 @@ fn open_wired(device: &Device) -> Result<File, Error> {
             "Opened HID descriptor differs from discovery; run discovery again",
         ));
     }
-    check_wired_access(&file)?;
+    check_control_access(&file)?;
     Ok(file)
 }
 
 // Best-effort detection, not mandatory exclusivity: hidraw has no exclusive
 // open. Protected processes and a controller opening after this scan can evade
 // it. Other controllers must still be fully closed before using the backend.
-fn check_wired_access(file: &File) -> Result<(), Error> {
+fn check_control_access(file: &File) -> Result<(), Error> {
     check_hid_holders(
         Path::new("/proc"),
         file.metadata().map_err(io_error)?.rdev(),
@@ -451,7 +461,7 @@ fn check_hid_holders(proc_root: &Path, target: u64, own_pid: u32) -> Result<(), 
                 return Err(Error::new(
                     "competing_controller",
                     &format!(
-                        "Another process holds the wired HID device: PID {pid} ({}). Fully exit it, including its tray/background process, before another read/review/apply; no process was stopped",
+                        "Another process holds the HID control device: PID {pid} ({}). Fully exit it, including its tray/background process, before another read/review/apply; no process was stopped",
                         if name.is_empty() { "unknown" } else { &name }
                     ),
                 ));
@@ -545,7 +555,126 @@ fn preview_target(devices: &[Device]) -> Result<usize, Error> {
     Ok(index)
 }
 
+fn control_target(devices: &[Device]) -> Result<usize, Error> {
+    if devices.iter().any(|d| d.transport == Transport::Wired) {
+        return preview_target(devices);
+    }
+    let receivers: Vec<_> = devices
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.transport == Transport::Wireless && d.interface_verified)
+        .collect();
+    if receivers.len() > 1 {
+        return Err(Error::new(
+            "ambiguous_device",
+            "Multiple receivers found; disconnect extra receivers before controlling lighting",
+        ));
+    }
+    let (index, device) = receivers.first().ok_or_else(|| Error::new("device_not_found", "No supported control interface found; connect the F75 by cable or its 3554:fa09 receiver"))?;
+    if device.interface_number != Some(1) {
+        return Err(Error::new(
+            "unverified_interface",
+            "Wireless lighting requires receiver interface 1",
+        ));
+    }
+    Ok(*index)
+}
+
+fn read_wireless(device: &Device) -> Result<Configuration, Error> {
+    let file = open_control(device)?;
+    let mut io = Radio(&file);
+    let bytes = crate::wireless::read(&mut io, crate::wireless::Read::Configuration)?;
+    crate::wireless::parse_config(&bytes)
+}
+
+struct Radio<'a>(&'a File);
+
+impl crate::wireless::Io for Radio<'_> {
+    fn send(&mut self, packet: &crate::wireless::Packet) -> Result<(), Error> {
+        sleep(Duration::from_millis(20));
+        if self.0.write(packet).map_err(io_error)? != crate::wireless::REPORT_LEN {
+            return Err(Error::new(
+                "incomplete_transfer",
+                "Receiver output transfer was incomplete; no retry was attempted",
+            ));
+        }
+        Ok(())
+    }
+
+    fn receive(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(Vec::new());
+            }
+            let mut pollfd = nix::libc::pollfd {
+                fd: self.0.as_raw_fd(),
+                events: nix::libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: pollfd points to one initialized entry and the fd is live.
+            let ready = unsafe {
+                nix::libc::poll(
+                    &mut pollfd,
+                    1,
+                    remaining.as_millis().clamp(1, i32::MAX as u128) as i32,
+                )
+            };
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(io_error(error));
+            }
+            if ready == 0 {
+                return Ok(Vec::new());
+            }
+            if pollfd.revents & (nix::libc::POLLHUP | nix::libc::POLLERR | nix::libc::POLLNVAL) != 0
+            {
+                return Err(Error::new(
+                    "disconnected",
+                    "Receiver disconnected during the exchange",
+                ));
+            }
+            let mut buffer = [0; 64];
+            match self.0.read(&mut buffer) {
+                Ok(0) => {
+                    return Err(Error::new(
+                        "disconnected",
+                        "Receiver closed during the exchange",
+                    ));
+                }
+                Ok(n) => return Ok(buffer[..n].to_vec()),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(io_error(e)),
+            }
+        }
+    }
+}
+
 pub fn preview_color(devices: &mut [Device], color: protocol::Color) -> Result<(), Error> {
+    if !devices.is_empty() && devices.iter().all(|d| d.transport == Transport::Wireless) {
+        let index = control_target(devices)?;
+        let _guard = command_lock()?;
+        let device = &mut devices[index];
+        let file = open_control(device)?;
+        let config = crate::wireless::preview(&mut Radio(&file), color)?;
+        device.configuration = Some(config);
+        device.protocol_verified = true;
+        device.keyboard_connected = Some(true);
+        device.capabilities.read_configuration = true;
+        device.state = "color_frame_sent_unverified";
+        return Ok(());
+    }
     let index = preview_target(devices)?;
     let _guard = command_lock()?;
     let device = &mut devices[index];
@@ -579,9 +708,25 @@ pub fn prepare_lighting(
     devices: &mut [Device],
     request: protocol::LightingRequest,
 ) -> Result<protocol::LightingPlan, Error> {
-    let index = preview_target(devices)?;
+    let index = control_target(devices)?;
     let _guard = command_lock()?;
     let device = &mut devices[index];
+    if device.transport == Transport::Wireless {
+        crate::wireless::require_supported(request)?;
+        let file = open_control(device)?;
+        let mut io = Radio(&file);
+        let raw = crate::wireless::read_report(&mut io, ReadReport::Configuration)?;
+        let config = crate::wireless::parse_config(&raw[8..136])?;
+        let matrix = crate::wireless::read_report(&mut io, ReadReport::StaticMatrix)?;
+        let plan = crate::wireless::prepare(request, &config, &matrix)?;
+        device.configuration = Some(config);
+        device.protocol_verified = true;
+        device.keyboard_connected = Some(true);
+        device.capabilities.read_configuration = true;
+        device.state = "verified_read_only";
+        update_brightness_capability(device);
+        return Ok(plan);
+    }
     let file = open_wired(device)?;
     let (config, model) = read_status(&file)?;
     device.configuration = Some(config);
@@ -627,9 +772,12 @@ pub fn apply_lighting(
     let mut rejected = crate::static_write::ApplyResult::new(request);
     rejected.failed_step = Some("device_validation");
     let setup = (|| {
-        let index = preview_target(devices)?;
+        let index = control_target(devices)?;
+        if devices[index].transport == Transport::Wireless {
+            crate::wireless::require_supported(request)?;
+        }
         let guard = command_lock()?;
-        let file = open_wired(&devices[index])?;
+        let file = open_control(&devices[index])?;
         let power = if request.power().is_some() {
             Some(crate::power::Session::load(verify_instance(
                 &devices[index],
@@ -647,20 +795,37 @@ pub fn apply_lighting(
             return rejected;
         }
     };
+    let wireless = devices[index].transport == Transport::Wireless;
     let mut result = crate::static_write::execute(
         request,
         review,
-        |kind| read_report(&file, kind),
-        |plan, step| transfer_report(&file, &plan.write_packet(step)?),
+        |kind| {
+            if wireless {
+                crate::wireless::read_report(&mut Radio(&file), kind)
+            } else {
+                read_report(&file, kind)
+            }
+        },
+        |plan, step| {
+            if wireless {
+                crate::wireless::write_step(&mut Radio(&file), plan, step)
+            } else {
+                transfer_report(&file, &plan.write_packet(step)?)
+            }
+        },
         crate::static_write::save_snapshot,
         || {
-            check_wired_access(&file)?;
+            check_control_access(&file)?;
             if request.power().is_some() {
                 verify_instance(&devices[index], &file)?;
             }
             Ok(())
         },
-        power.as_mut(),
+        if wireless {
+            crate::static_write::Target::Wireless
+        } else {
+            crate::static_write::Target::Wired(power.as_mut())
+        },
     );
     record_static_result(&mut devices[index], &mut result);
     result
@@ -740,6 +905,14 @@ fn record_static_result(device: &mut Device, result: &mut crate::static_write::A
 }
 
 fn update_brightness_capability(device: &mut Device) {
+    if device.transport == Transport::Wireless {
+        device.capabilities.brightness = device.protocol_verified
+            && device.configuration.as_ref().is_some_and(|c| {
+                protocol::brightness_offset(c).is_ok()
+                    && c.active_effect.is_some_and(|e| e.id <= 18)
+            });
+        return;
+    }
     device.capabilities.lighting_power = device.transport == Transport::Wired
         && device.interface_verified
         && device.interface_number == Some(1)
@@ -1030,17 +1203,27 @@ mod tests {
             preview_color(&mut receivers, protocol::Color([1, 2, 3]))
                 .unwrap_err()
                 .code,
-            "device_not_found"
+            "unverified_interface"
         );
-        inspect(&mut receivers);
-        assert_eq!(receivers[0].state, "receiver_present");
+        receivers[0].interface_number = Some(1);
+        assert_eq!(control_target(&receivers).unwrap(), 0);
+        let mut extra = discover_at(&sysfs, &nodes, Some(Transport::Wireless)).unwrap();
+        extra[0].interface_number = Some(1);
+        receivers.extend(extra);
+        assert_eq!(
+            control_target(&receivers).unwrap_err().code,
+            "ambiguous_device"
+        );
+        receivers.pop();
+        inspect_with(&mut receivers, |d| read_wireless(d).map(|c| (c, None)));
+        assert_eq!(receivers[0].state, "unavailable");
         assert_eq!(receivers[0].keyboard_connected, None);
         assert!(!receivers[0].protocol_verified);
         assert!(!receivers[0].capabilities.brightness);
         assert!(!receivers[0].capabilities.brightness_visual_verified);
         let json = serde_json::to_value(&receivers).unwrap();
         assert_eq!(json[0]["capabilities"]["static_color"], false);
-        assert_eq!(json[0]["error"]["code"], "wireless_status_unavailable");
+        assert_eq!(json[0]["error"]["code"], "disconnected");
         assert!(json[0].get("path").is_none() && json[0].get("descriptor").is_none());
         assert!(
             discover_at(&root.join("absent"), &nodes, None)

@@ -21,7 +21,7 @@ fn json_stdout_and_exit_status_are_a_client_contract() {
             vec![
                 "lighting",
                 "color",
-                "#89b4fa",
+                "#12345g",
                 "--transport",
                 "wireless",
                 "--json",
@@ -60,34 +60,10 @@ fn json_stdout_and_exit_status_are_a_client_contract() {
             vec!["lighting", "palette", "#ff0000", "--dry-run", "--json"],
             2,
         ),
-        (
-            vec![
-                "lighting",
-                "palette",
-                "green",
-                "--dry-run",
-                "--transport",
-                "wireless",
-                "--json",
-            ],
-            2,
-        ),
         (vec!["lighting", "speed", "2", "--json"], 2),
         (vec!["lighting", "speed", "2", "--apply", "--json"], 2),
         (vec!["lighting", "speed", "-1", "--dry-run", "--json"], 2),
         (vec!["lighting", "speed", "5", "--dry-run", "--json"], 2),
-        (
-            vec![
-                "lighting",
-                "speed",
-                "2",
-                "--dry-run",
-                "--transport",
-                "wireless",
-                "--json",
-            ],
-            2,
-        ),
         (vec!["lighting", "brightness", "5", "--json"], 2),
         (vec!["lighting", "brightness", "5", "--apply", "--json"], 2),
         (
@@ -96,18 +72,6 @@ fn json_stdout_and_exit_status_are_a_client_contract() {
         ),
         (
             vec!["lighting", "brightness", "1.5", "--dry-run", "--json"],
-            2,
-        ),
-        (
-            vec![
-                "lighting",
-                "brightness",
-                "5",
-                "--dry-run",
-                "--transport",
-                "wireless",
-                "--json",
-            ],
             2,
         ),
         (vec!["lighting", "off", "--json"], 2),
@@ -184,4 +148,36 @@ fn json_stdout_and_exit_status_are_a_client_contract() {
             assert!(packet.starts_with("0608000001007a0189b4fa"));
         }
     }
+}
+
+#[test]
+fn wireless_color_dry_run_emits_only_output_frames_without_discovery() {
+    let output = Command::new(env!("CARGO_BIN_EXE_aulaf75ctl"))
+        .args([
+            "lighting",
+            "color",
+            "#89b4fa",
+            "--transport",
+            "wireless",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["devices"], serde_json::json!([]));
+    assert_eq!(json["lighting"]["report_id"], 0x13);
+    assert_eq!(json["lighting"]["command"], 0x88);
+    assert!(json["lighting"].get("packet_hex").is_none());
+    assert!(json["lighting"].get("required_model").is_none());
+    let packets = json["lighting"]["packets_hex"].as_array().unwrap();
+    assert_eq!(packets.len(), 10);
+    assert!(packets.iter().all(|p| p.as_str().unwrap().len() == 40));
+    assert!(
+        packets[0]
+            .as_str()
+            .unwrap()
+            .starts_with("13880a001e89b4fa7e")
+    );
 }

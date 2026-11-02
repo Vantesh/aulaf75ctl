@@ -1,4 +1,4 @@
-//! Reviewed wired static/effect/brightness/speed/palette operations. No retries or rollback.
+//! Reviewed lighting operations. Configuration writes are never retried or rolled back.
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -179,6 +179,11 @@ fn validate_review(plan: &LightingPlan, review: &Value) -> Result<(), Error> {
 
 // Real I/O is bound to one checked fd; tests inject in-memory replies/sends and
 // temporary snapshots. Read-only commands do not call this executor.
+pub enum Target<'a> {
+    Wired(Option<&'a mut crate::power::Session>),
+    Wireless,
+}
+
 pub fn execute(
     request: LightingRequest,
     review: &Value,
@@ -186,14 +191,27 @@ pub fn execute(
     mut send: impl FnMut(&LightingPlan, WriteStep) -> Result<(), Error>,
     save: impl FnOnce(&LightingPlan) -> Result<PathBuf, Error>,
     mut check_access: impl FnMut() -> Result<(), Error>,
-    mut power: Option<&mut crate::power::Session>,
+    target: Target<'_>,
 ) -> ApplyResult {
+    let (wireless, mut power) = match target {
+        Target::Wired(power) => (false, power),
+        Target::Wireless => (true, None),
+    };
     let mut result = ApplyResult::new(request);
     let operation = (|| -> Result<(), Error> {
-        result.failed_step = Some("model_read");
-        result.model = Some(protocol::require_f75_model(&read(ReadReport::Model)?)?);
+        if wireless {
+            crate::wireless::require_supported(request)?;
+        } else {
+            result.failed_step = Some("model_read");
+            result.model = Some(protocol::require_f75_model(&read(ReadReport::Model)?)?);
+        }
         result.failed_step = Some("configuration_read");
-        let config = protocol::parse_config(&read(ReadReport::Configuration)?)?;
+        let raw = read(ReadReport::Configuration)?;
+        let config = if wireless {
+            crate::wireless::parse_config(&protocol::parse_config(&raw)?.bytes)?
+        } else {
+            protocol::parse_config(&raw)?
+        };
         result.failed_step = Some("matrix_read");
         let matrix = read(ReadReport::StaticMatrix)?;
         let plan = if let Some(action) = request.power() {
@@ -206,6 +224,8 @@ pub fn execute(
                     )
                 })?
                 .prepare(action, &config, &matrix)?
+        } else if wireless {
+            crate::wireless::prepare(request, &config, &matrix)?
         } else {
             request.prepare(&config, &matrix)?
         };
@@ -278,7 +298,11 @@ pub fn execute(
         let actual = protocol::parse_config(&read(ReadReport::Configuration)?)?;
         result.hardware_mode = actual.lighting_mode;
         let matches = actual.bytes == plan.configuration;
-        result.configuration = Some(actual);
+        result.configuration = Some(if wireless {
+            crate::wireless::parse_config(&actual.bytes)?
+        } else {
+            actual
+        });
         if !matches {
             result.configuration_readback = "mismatch";
             return Err(Error::new(
@@ -396,6 +420,13 @@ fn save_snapshot_at(
             "configuration_refresh": plan.configuration_refresh}},
         "raw": {"configuration": plan.original_configuration.as_slice(),
             "matrix": plan.original_matrix.as_slice()}});
+    if plan.transport == Some(crate::device::Transport::Wireless) {
+        snapshot["metadata"]["usb_id"] = json!("3554:fa09");
+        snapshot["metadata"]["transport"] = json!("wireless");
+        snapshot["metadata"]["model_identity"] = Value::Null;
+        snapshot["metadata"]["model_reply"] = Value::Null;
+        snapshot["raw"]["matrix"] = json!(&plan.original_matrix[..protocol::LIVE_RGB_LEN]);
+    }
     if let Some(rgb) = plan.rgb {
         snapshot["metadata"]["intended_operation"]["rgb"] = json!(rgb);
     }
@@ -562,7 +593,7 @@ mod tests {
                 )
             },
             || Ok(()),
-            Some(session),
+            Target::Wired(Some(session)),
         );
         if failure == "commit" {
             fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1126,7 +1157,7 @@ mod tests {
                     Ok(())
                 }
             },
-            None,
+            Target::Wired(None),
         );
         (result, trace.into_inner())
     }
@@ -1730,6 +1761,34 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn wireless_snapshots_store_only_observed_bytes_and_no_wired_model_identity() {
+        let (root, _) = power_runtime();
+        let (_, config, matrix, _, _) = fixture();
+        let config = crate::wireless::parse_config(&config[8..136]).unwrap();
+        let plan = crate::wireless::prepare(
+            LightingRequest::Brightness(protocol::Brightness::parse("5").unwrap()),
+            &config,
+            &matrix,
+        )
+        .unwrap();
+        let path = save_snapshot_at(&root, "wireless.json", 123, &plan).unwrap();
+        let snapshot: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(snapshot["metadata"]["usb_id"], "3554:fa09");
+        assert_eq!(snapshot["metadata"]["transport"], "wireless");
+        assert!(snapshot["metadata"]["model_identity"].is_null());
+        assert!(snapshot["metadata"]["model_reply"].is_null());
+        assert_eq!(
+            snapshot["raw"]["configuration"].as_array().unwrap().len(),
+            128
+        );
+        assert_eq!(
+            snapshot["raw"]["matrix"],
+            json!(&plan.original_matrix[..378])
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

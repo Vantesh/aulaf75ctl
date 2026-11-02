@@ -6,10 +6,10 @@ use crate::{
     protocol::{Brightness, Color, Effect, IndicatorMode, LightingRequest, Palette, Speed},
 };
 
-pub const HELP: &str = "aulaf75ctl — guarded wired AULA F75 lighting control (Linux)
+pub const HELP: &str = "aulaf75ctl — guarded AULA F75 wired / 2.4 GHz lighting control (Linux)
 
 Usage: aulaf75ctl [--json] [--transport wired|wireless] <devices|status>
-       aulaf75ctl [--json] [--transport wired] lighting color '#RRGGBB' [--dry-run]
+       aulaf75ctl [--json] [--transport wired|wireless] lighting color '#RRGGBB' [--dry-run]
        aulaf75ctl [--json] [--transport wired] lighting static '#RRGGBB' --dry-run
        aulaf75ctl [--json] lighting static '#RRGGBB' --apply --review <dry-run.json>
        aulaf75ctl [--json] lighting effect <name|id> --dry-run [--details] --transport wired
@@ -29,14 +29,17 @@ Usage: aulaf75ctl [--json] [--transport wired|wireless] <devices|status>
        aulaf75ctl --version
 
 devices   Passive USB HID discovery; sends no protocol requests
-status    Validate/read wired configuration; receiver detection stays passive
+status    Validate/read configuration over USB or the 2.4 GHz receiver
 --json    Emit one schema-versioned JSON object; diagnostics go to stderr
 --dry-run Color preview: hardware-free packet; persistent lighting: read-only device-backed diff
 --details Include full persistent lighting review data and packets (requires --json)
 
-Color preview sends one volatile 0x08 frame only after wired config/model checks.
+Color preview sends wired 0x08 or fragmented wireless 0x88 after mode checks.
 The preview may be transient; its physical behavior is unverified. Unknown modes are rejected.
 Persistent lighting apply requires a matching review and snapshot before writes.
+Native effect/brightness/speed/palette commands also accept --transport wireless.
+Wireless static RGB, self-defined selection, indicator and session On/Off are unverified/disabled.
+Without a selection, persistent commands prefer wired, then a single receiver.
 Wired color changes retain Studio's effect refresh; identical requests skip writes.
 Default output is concise; --dry-run --details --json creates an applicable review.
 Visible competing HID holders are rejected; the advisory lock is not exclusive.
@@ -160,12 +163,6 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
         ));
     }
     let command = if persistent {
-        if transport == Some(Transport::Wireless) {
-            return Err(Error::new(
-                "unsupported_transport",
-                "Persistent lighting is wired-only; no receiver was opened",
-            ));
-        }
         let request = match positional.as_slice() {
             ["indicator", "mode", value] => {
                 LightingRequest::Indicator(IndicatorMode::parse(value)?)
@@ -181,6 +178,9 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
             ["lighting", "on"] => LightingRequest::Power(crate::power::Action::On),
             _ => unreachable!("persistent command shape checked above"),
         };
+        if transport == Some(Transport::Wireless) {
+            crate::wireless::require_supported(request)?;
+        }
         if apply && !dry_run {
             let review = review.take().ok_or_else(|| {
                 Error::new(
@@ -222,15 +222,7 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
                 }
                 Command::IndicatorStatus
             }
-            ["lighting", "color", rgb] => {
-                if transport == Some(Transport::Wireless) {
-                    return Err(Error::new(
-                        "unsupported_transport",
-                        "Color preview is wired-only; no receiver was opened",
-                    ));
-                }
-                Command::Color(Color::parse(rgb)?)
-            }
+            ["lighting", "color", rgb] => Command::Color(Color::parse(rgb)?),
             [] => Command::Help,
             _ => {
                 return Err(Error::new(
@@ -274,6 +266,66 @@ pub fn parse(args: &[String]) -> Result<Options, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wireless_native_commands_keep_the_same_validation_and_review_contract() {
+        for (command, value) in [
+            ("effect", "rainbow"),
+            ("brightness", "4"),
+            ("speed", "2"),
+            ("palette", "green"),
+        ] {
+            let args = [
+                "lighting",
+                command,
+                value,
+                "--transport",
+                "wireless",
+                "--dry-run",
+                "--details",
+                "--json",
+            ]
+            .map(String::from);
+            let parsed = parse(&args).unwrap();
+            assert_eq!(parsed.transport, Some(Transport::Wireless));
+            assert!(parsed.dry_run);
+            let args = [
+                "lighting",
+                command,
+                value,
+                "--transport",
+                "wireless",
+                "--apply",
+                "--review",
+                "review.json",
+            ]
+            .map(String::from);
+            assert!(matches!(
+                parse(&args).unwrap().command,
+                Command::Apply { .. }
+            ));
+            let args = [
+                "lighting",
+                command,
+                value,
+                "--transport",
+                "wireless",
+                "--apply",
+            ]
+            .map(String::from);
+            assert_eq!(parse(&args).err().unwrap().code, "approval_required");
+        }
+        let args = [
+            "lighting",
+            "color",
+            "#89b4fa",
+            "--transport",
+            "wireless",
+            "--dry-run",
+        ]
+        .map(String::from);
+        assert!(matches!(parse(&args).unwrap().command, Command::Color(_)));
+    }
 
     #[test]
     fn indicator_commands_require_exact_names_and_wired_review() {
@@ -470,24 +522,6 @@ mod tests {
                 "--review",
                 "r.json",
             ],
-            vec![
-                "lighting",
-                "palette",
-                "red",
-                "--dry-run",
-                "--transport",
-                "wireless",
-            ],
-            vec![
-                "lighting",
-                "palette",
-                "red",
-                "--apply",
-                "--review",
-                "r.json",
-                "--transport",
-                "wireless",
-            ],
         ] {
             assert!(parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
         }
@@ -544,24 +578,6 @@ mod tests {
                 "--apply",
                 "--review",
                 "r.json",
-            ],
-            vec![
-                "lighting",
-                "speed",
-                "2",
-                "--dry-run",
-                "--transport",
-                "wireless",
-            ],
-            vec![
-                "lighting",
-                "speed",
-                "2",
-                "--apply",
-                "--review",
-                "r.json",
-                "--transport",
-                "wireless",
             ],
         ] {
             assert!(parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
@@ -626,24 +642,6 @@ mod tests {
                 "--review",
                 "r.json",
             ],
-            vec![
-                "lighting",
-                "brightness",
-                "5",
-                "--dry-run",
-                "--transport",
-                "wireless",
-            ],
-            vec![
-                "lighting",
-                "brightness",
-                "5",
-                "--apply",
-                "--review",
-                "r.json",
-                "--transport",
-                "wireless",
-            ],
         ] {
             assert!(parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
         }
@@ -693,14 +691,6 @@ mod tests {
                 "--apply",
                 "--review",
                 "r.json",
-            ],
-            vec![
-                "lighting",
-                "effect",
-                "rainbow",
-                "--dry-run",
-                "--transport",
-                "wireless",
             ],
             vec!["lighting", "effect", "rain", "--dry-run"],
             vec!["lighting", "effect", "19", "--dry-run"],

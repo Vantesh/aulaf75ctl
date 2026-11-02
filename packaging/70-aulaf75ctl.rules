@@ -1,5 +1,8 @@
-# Optional; never installed by aulaf75ctl. Only the wired control interface.
+# Optional; never installed by aulaf75ctl. Only the wired and receiver control interfaces.
 # USB device and interface attributes live on different parents: import usb_id,
 # then match its interface property rather than mixing ATTRS parent scopes.
 ACTION=="add|change", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="010c", IMPORT{builtin}="usb_id"
 ACTION=="add|change", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="258a", ENV{ID_MODEL_ID}=="010c", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"
+# Receiver control is interface 1; never grant the ordinary keyboard interface.
+ACTION=="add|change", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="fa09", IMPORT{builtin}="usb_id"
+ACTION=="add|change", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="3554", ENV{ID_MODEL_ID}=="fa09", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

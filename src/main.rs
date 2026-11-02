@@ -6,6 +6,7 @@ mod device;
 mod power;
 mod protocol;
 mod static_write;
+mod wireless;
 
 use serde::Serialize;
 use std::io::{self, Write};
@@ -74,7 +75,10 @@ struct Lighting {
     hardware_verified: bool,
     outcome: &'static str,
     required_mode: [u8; 2],
-    required_model: [u8; 6],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_model: Option<[u8; 6]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packets_hex: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     packet_hex: Option<String>,
 }
@@ -131,20 +135,38 @@ fn run(options: cli::Options) -> Report {
         indicator_result: None,
         lighting: color.map(|color| Lighting {
             rgb: color.0,
-            command: 8,
-            report_id: 6,
+            command: if options.transport == Some(device::Transport::Wireless) {
+                0x88
+            } else {
+                8
+            },
+            report_id: if options.transport == Some(device::Transport::Wireless) {
+                0x13
+            } else {
+                6
+            },
             dry_run: options.dry_run,
             persistent: false,
             hardware_verified: false,
             outcome: "not_sent",
             required_mode: protocol::PER_KEY_MODE,
-            required_model: protocol::F75_MODEL,
-            packet_hex: options.dry_run.then(|| {
-                protocol::color_frame(color)
+            required_model: (options.transport != Some(device::Transport::Wireless))
+                .then_some(protocol::F75_MODEL),
+            packets_hex: (options.dry_run
+                && options.transport == Some(device::Transport::Wireless))
+            .then(|| {
+                wireless::preview_packets(color)
                     .iter()
-                    .map(|b| format!("{b:02x}"))
+                    .map(|p| p.iter().map(|b| format!("{b:02x}")).collect())
                     .collect()
             }),
+            packet_hex: (options.dry_run && options.transport != Some(device::Transport::Wireless))
+                .then(|| {
+                    protocol::color_frame(color)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect()
+                }),
         }),
     };
     if options.dry_run && matches!(options.command, cli::Command::Color(_)) {
@@ -174,13 +196,11 @@ fn run(options: cli::Options) -> Report {
     } else {
         None
     };
-    let transport =
-        if color.is_some() || request.is_some() || options.command == cli::Command::IndicatorStatus
-        {
-            Some(device::Transport::Wired)
-        } else {
-            options.transport
-        };
+    let transport = if color.is_some() || options.command == cli::Command::IndicatorStatus {
+        options.transport.or(Some(device::Transport::Wired))
+    } else {
+        options.transport
+    };
     match device::discover(transport) {
         Ok(devices) => report.devices = devices,
         Err(error) => {
@@ -277,18 +297,21 @@ fn operate(
         ));
     } else {
         inspect(&mut report.devices);
-        // A passive receiver can coexist with a successfully read wired board.
-        // With receiver-only discovery there is no claim of keyboard connectivity.
+        // Each selected control interface must complete its own protocol read.
+        let wired_present = report
+            .devices
+            .iter()
+            .any(|d| d.transport == device::Transport::Wired);
         report.ok = report.devices.iter().any(|d| d.protocol_verified)
             && report
                 .devices
                 .iter()
-                .filter(|d| d.transport == device::Transport::Wired)
+                .filter(|d| !wired_present || d.transport == device::Transport::Wired)
                 .all(|d| d.protocol_verified);
         if !report.ok {
             report.error = Some(Error::new(
                 "status_unavailable",
-                "No complete verified wired status is available; inspect the per-device diagnostics",
+                "No complete verified status is available; inspect the per-device diagnostics",
             ));
         }
     }
@@ -432,13 +455,17 @@ fn main() -> ExitCode {
                 )?;
                 writeln!(
                     out,
-                    "  RGB #{:02x}{:02x}{:02x}; report 06 command 08; 378 RGB bytes, 520 report bytes",
-                    lighting.rgb[0], lighting.rgb[1], lighting.rgb[2]
+                    "  RGB #{:02x}{:02x}{:02x}; report {:02x} command {:02x}",
+                    lighting.rgb[0],
+                    lighting.rgb[1],
+                    lighting.rgb[2],
+                    lighting.report_id,
+                    lighting.command
                 )?;
                 if lighting.dry_run {
                     writeln!(
                         out,
-                        "  No device opened; requires self-defined flag/effect [1,21] and F75 model 03 00 00 00 00 cd"
+                        "  No device opened; requires self-defined flag/effect [1,21]; wired also requires F75 model 03 00 00 00 00 cd"
                     )?;
                 }
             }
