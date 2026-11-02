@@ -132,3 +132,57 @@ keyboard session. Wireless `lighting effect off` is available; resume with an
 explicit native effect. No reset (`06`), save/profile, pairing, Bluetooth, keymap
 or macro commands are exposed or sent. Existing wired behavior and packet formats
 remain intact.
+
+## Follow-up validation and recovery (2026-11-02)
+
+The receiver was physically unplugged before a read-only wireless status request.
+The CLI exited with `device_not_found` and an empty device list. Reconnecting the
+receiver recreated its hidraw nodes with root-only permissions; the temporary ACL
+on the old node did not survive. Use the documented interface-scoped udev rule
+or grant access to the new control node before testing again. After the user
+restored access, a read-only status succeeded. The user then switched the keyboard
+off for 10 seconds and back to 2.4 GHz, observing unchanged lighting and normal
+typing. Before and after that cycle status reported Fixed On, green and brightness
+6. This verifies only those reported settings for that cycle; the complete raw
+configuration was not compared and other settings remain unverified.
+
+The synthetic suite exercises a fresh assembly on one read retry, bounded retry
+count, incomplete responses, malformed checksums, stale or cross-transport
+reviews, snapshots, no-op handling and failed or uncertain transfers. It does
+not establish a physical cause for dropped fragments. The code compares a fresh
+read against the review on every apply, but does not consume the review file:
+after an uncertain write, an old review can still match if the state appears
+unchanged. Operators must create and inspect a new review and explicitly apply
+it after investigating a failure; this is an operational requirement, not an
+enforced single-use authorization guarantee.
+
+After any uncertain transfer, stop and keep the JSON result and snapshot. Wake
+and reconnect the keyboard if needed, close other controllers, then use `status`
+and a new `--dry-run --details --json` to examine current configuration and RGB
+state. Compare the new plan with the saved snapshot and decide on a minimal
+separately reviewed change. Do not reuse the old review or automatically retry;
+readback cannot prove whether a partially acknowledged write took effect.
+
+Further physical checks used a fresh baseline of Fixed On, green, brightness 6.
+Each change and restoration used a new detailed review. The user observed Fixed
+On dim when brightness changed 6 → 4 and confirmed normal typing. Brightness 6
+was restored with exact configuration/RGB readbacks. A green → red palette change
+was observed as red with normal typing; green was restored. Rainbow visibly
+animated, and the user confirmed that movement changed when speed was switched
+between 4 and 0; typing worked. Rainbow speed 3 and Fixed On were restored.
+Final readback verified the original 128 configuration and 378 RGB bytes.
+
+During the first red-palette attempt, a complete initial review succeeded but
+the apply's matrix preflight returned `wireless_incomplete_response` after its
+bounded read retry. The result reported `failed_step: matrix_read`, no snapshot,
+and `configuration_write: not_attempted`. A subsequent status showed the baseline
+settings; a separately generated review then supported the successful red test.
+The underlying cause of the dropped fragments was not established; the failure
+must not be attributed solely to sleep or radio interference.
+
+The user subsequently observed the keyboard sleep and wake, with typing working.
+A read-only status after wake again reported Fixed On, green and brightness 6.
+A fresh brightness-6 no-op review/apply reported both writes skipped, no snapshot,
+and verified configuration and RGB readbacks. Volatile RGB was not tested on
+hardware: the current baseline is Fixed On, while the preview requires the exact
+Self-defined selector, which this validation was instructed not to enable.
